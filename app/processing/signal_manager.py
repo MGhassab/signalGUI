@@ -1,10 +1,11 @@
 """Wires together: incoming `Packet` -> per-signal processors -> bounded
-ring buffers ready for plotting / the Data1-8 table.
+ring buffers ready for plotting / per-panel Name/Value readouts.
 
-This is the one place that knows how to go from a `Packet` to plottable
-signal data; the GUI never touches processors or raw packet fields
-directly - it only calls `SignalManager.on_packet()` and reads back
-`get_plot_data()` / `get_latest_data_values()`.
+One `SignalManager` exists per graph panel. This is the one place that
+knows how to go from a `Packet` to plottable signal data; the GUI never
+touches processors or raw packet fields directly - it only calls
+`SignalManager.on_packet()` and reads back `get_plot_data()` /
+`get_latest_signal_outputs()`.
 """
 from __future__ import annotations
 
@@ -108,6 +109,18 @@ class SignalManager:
 
     def get_latest_data_values(self) -> Dict[str, int]:
         return dict(self._latest_data_values)
+
+    def get_latest_signal_outputs(self) -> Dict[str, float]:
+        """Latest computed output sample per *enabled* signal. Used by the
+        per-panel Name/Value readout. Disabled signals are omitted."""
+        outputs: Dict[str, float] = {}
+        for name, rt in self._runtimes.items():
+            if not rt.config.enabled:
+                continue
+            vals = rt.value_buffer.as_array()
+            if vals.size:
+                outputs[name] = float(vals[-1])
+        return outputs
 
     def clear_all(self) -> None:
         """Clears plotted history and resets processor state (e.g. the

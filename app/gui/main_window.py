@@ -1,31 +1,35 @@
-"""Main application window: wires the serial layer, packet parser, signal
-processing, and all GUI panels together.
+"""Main application window: hub that owns the single serial connection and
+the multi-panel workspace.
 
-The GUI never touches serial bytes or packet parsing directly - it only
-receives fully-formed `Packet` objects via `SerialManager.packetReceived`
-and hands them to `SignalManager`. This keeps low-level serial/parsing
-logic completely out of the GUI layer, per the architecture requirement.
+Responsibilities here are deliberately thin:
+
+- serial lifecycle (one `SerialManager` for the whole app),
+- menus (File/Serial/Panel) + connection status in the status bar,
+- fanning every decoded packet out to all open `GraphPanel`s,
+- one shared, throttled plot-refresh timer.
+
+Each `GraphPanel` owns its own `SignalManager`/plot/signal-config, so all
+signal processing stays per-panel. The GUI never touches serial bytes or
+packet parsing directly - it only receives fully-formed `Packet` objects.
 """
 from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtCore import Qt, QTimer, Slot
+from PySide6.QtCore import Qt, QEvent, QTimer, Slot
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QSplitter, QMessageBox,
-    QFileDialog, QStatusBar
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QMessageBox,
+    QFileDialog, QStatusBar, QLabel,
 )
 
-from gui.serial_panel import SerialPanel
-from gui.data_table import DataTable
-from gui.signal_panel import SignalPanel
-from gui.plot_widget import PlotWidget
+from gui.graph_panel import GraphPanel
+from gui.workspace import Workspace
+from gui.serial_config_dialog import prompt_serial_config
 
 from models.packet import Packet
-from models.app_config import AppConfig
+from models.app_config import AppConfig, PanelConfig
 from serial_io.packet_parser import PacketParser, PacketFormat
 from serial_io.serial_manager import SerialManager
-from processing.signal_manager import SignalManager
 from config.config_manager import ConfigManager
 
 PLOT_REFRESH_MS = 50  # throttle GUI plot redraws independent of packet rate
@@ -42,14 +46,21 @@ class MainWindow(QMainWindow):
         self._packet_format = PacketFormat(byte_order="little", signed=False)
         self._parser = PacketParser(fmt=self._packet_format)
         self._serial = SerialManager(self._parser)
-        self._signal_manager = SignalManager()
+
+        self._serial_port: str = ""
+        self._baud_rate: int = 115200
 
         self._build_ui()
         self._wire_signals()
+        self._update_serial_actions()
+
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
 
         self._plot_timer = QTimer(self)
         self._plot_timer.setInterval(PLOT_REFRESH_MS)
-        self._plot_timer.timeout.connect(self._refresh_plot)
+        self._plot_timer.timeout.connect(self._refresh_all_plots)
         self._plot_timer.start()
 
         self._current_config_path: Optional[str] = None
@@ -59,27 +70,23 @@ class MainWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         root = QVBoxLayout(central)
+        root.setContentsMargins(0, 0, 0, 0)
 
-        self.serial_panel = SerialPanel()
-        root.addWidget(self.serial_panel)
-
-        self.plot_widget = PlotWidget()
-        root.addWidget(self.plot_widget, stretch=1)
-
-        bottom_splitter = QSplitter(Qt.Horizontal)
-        self.signal_panel = SignalPanel()
-        self.data_table = DataTable()
-        bottom_splitter.addWidget(self.signal_panel)
-        bottom_splitter.addWidget(self.data_table)
-        bottom_splitter.setStretchFactor(0, 2)
-        bottom_splitter.setStretchFactor(1, 1)
-        root.addWidget(bottom_splitter, stretch=1)
+        self._workspace = Workspace()
+        root.addWidget(self._workspace)
 
         self._build_menu()
-        self.setStatusBar(QStatusBar())
+
+        status_bar = QStatusBar()
+        self.setStatusBar(status_bar)
+        self._status_label = QLabel()
+        status_bar.addPermanentWidget(self._status_label)
+        self._render_status_label(False)
 
     def _build_menu(self) -> None:
         menu_bar = self.menuBar()
+
+        # -- File ---------------------------------------------------------
         file_menu = menu_bar.addMenu("&File")
 
         save_action = file_menu.addAction("Save Configuration...")
@@ -92,105 +99,145 @@ class MainWindow(QMainWindow):
         reset_action.triggered.connect(self._on_reset_config)
 
         file_menu.addSeparator()
-        clear_action = file_menu.addAction("Clear Graph")
-        clear_action.triggered.connect(self._on_clear_graph)
+        clear_action = file_menu.addAction("Clear Active Panel")
+        clear_action.triggered.connect(self._on_clear_active_panel)
+
+        # -- Serial ----------------------------------------------------------
+        serial_menu = menu_bar.addMenu("&Serial")
+
+        self._connect_action = serial_menu.addAction("Connect")
+        self._connect_action.triggered.connect(self._on_connect)
+
+        self._disconnect_action = serial_menu.addAction("Disconnect")
+        self._disconnect_action.triggered.connect(self._serial.disconnect)
+
+        serial_menu.addSeparator()
+        config_action = serial_menu.addAction("Configuration...")
+        config_action.triggered.connect(self._on_serial_config)
+
+        # -- Panel ------------------------------------------------------------
+        panel_menu = menu_bar.addMenu("&Panel")
+
+        add_action = panel_menu.addAction("Add Panel")
+        add_action.triggered.connect(lambda: self._workspace.add_panel())
+
+        panel_menu.addSeparator()
+        split_h = panel_menu.addAction("Split Panel \u2192 Right")
+        split_h.triggered.connect(
+            lambda: self._split_active(Qt.Horizontal)
+        )
+        split_v = panel_menu.addAction("Split Panel \u2193 Below")
+        split_v.triggered.connect(
+            lambda: self._split_active(Qt.Vertical)
+        )
+
+        panel_menu.addSeparator()
+        close_action = panel_menu.addAction("Close Panel")
+        close_action.triggered.connect(self._close_active_panel)
 
     def _wire_signals(self) -> None:
-        self.serial_panel.connectClicked.connect(self._on_connect)
-        self.serial_panel.disconnectClicked.connect(self._serial.disconnect)
-
-        self._serial.connected.connect(lambda: self.serial_panel.set_connected(True))
+        self._serial.connected.connect(self._on_connected)
         self._serial.disconnected.connect(self._on_disconnected)
         self._serial.errorOccurred.connect(self._on_serial_error)
         self._serial.packetReceived.connect(self._on_packet)
 
-        self.data_table.nameChanged.connect(self._on_data_name_changed)
-        self.signal_panel.signalsChanged.connect(self._on_signals_changed)
-        self.signal_panel.signalEnabledChanged.connect(self._on_signal_enabled_changed)
-
     # -- serial connection lifecycle -----------------------------------------
-    @Slot(str, int)
-    def _on_connect(self, port: str, baud: int) -> None:
-        self._serial.connect_to(port, baud)
+    def _on_serial_config(self) -> None:
+        result = prompt_serial_config(
+            port=self._serial_port, baud=self._baud_rate, parent=self
+        )
+        if result is None:
+            return
+        self._serial_port, self._baud_rate = result
+        self._render_status_label(self._serial.is_connected)
+        self.statusBar().showMessage(
+            "Serial settings saved - they apply on the next connect.", 4000
+        )
+
+    def _on_connect(self) -> None:
+        if not self._serial_port:
+            self._on_serial_config()
+            if not self._serial_port:
+                return
+        self._serial.connect_to(self._serial_port, self._baud_rate)
+
+    @Slot()
+    def _on_connected(self) -> None:
+        self._update_serial_actions()
+        self._render_status_label(True)
 
     @Slot(str)
     def _on_disconnected(self, reason: str) -> None:
+        self._update_serial_actions()
+        self._render_status_label(False)
         if reason:
-            self.serial_panel.set_connection_lost(reason)
             self.statusBar().showMessage(f"Disconnected: {reason}", 5000)
-        else:
-            self.serial_panel.set_connected(False)
 
     @Slot(str)
     def _on_serial_error(self, message: str) -> None:
-        self.serial_panel.set_connected(False)
+        self._update_serial_actions()
+        self._render_status_label(False)
         QMessageBox.warning(self, "Serial Error", message)
 
+    def _update_serial_actions(self) -> None:
+        connected = self._serial.is_connected
+        self._connect_action.setEnabled(not connected)
+        self._disconnect_action.setEnabled(connected)
+
+    def _render_status_label(self, connected: bool) -> None:
+        if connected:
+            self._status_label.setText(
+                f"\u25cf Connected \u00b7 {self._serial_port} @ {self._baud_rate}"
+            )
+            self._status_label.setStyleSheet("color: #1b8a3d; font-weight: 600;")
+        else:
+            self._status_label.setText("\u25cf Disconnected")
+            self._status_label.setStyleSheet("color: #b00020; font-weight: 600;")
+
+    # -- packets + plotting ----------------------------------------------------
     @Slot(object)
     def _on_packet(self, packet: Packet) -> None:
-        self._signal_manager.on_packet(packet)
-        self.data_table.update_values(self._signal_manager.get_latest_data_values())
+        for panel in self._workspace.panels():
+            panel.on_packet(packet)
 
-    # -- signal configuration --------------------------------------------------
-    def _on_signals_changed(self) -> None:
-        configs = self.signal_panel.get_configs()
-        self._signal_manager.set_signals(configs)
-        self._resync_plot_axes()
+    def _refresh_all_plots(self) -> None:
+        for panel in self._workspace.panels():
+            panel.refresh_plot()
 
-    def _on_signal_enabled_changed(self, name: str, enabled: bool) -> None:
-        self._on_signals_changed()
+    # -- panel menu operations ------------------------------------------------
+    def _split_active(self, orientation: Qt.Orientation) -> None:
+        active = self._workspace.active_panel()
+        if active is not None:
+            self._workspace.split_panel(active, orientation)
 
-    def _resync_plot_axes(self) -> None:
-        enabled_names = set()
-        for cfg in self.signal_panel.get_configs():
-            if cfg.enabled:
-                enabled_names.add(cfg.name)
-                self.plot_widget.add_or_update_signal(cfg.name, cfg.y_min, cfg.y_max)
-        for existing_name in self.plot_widget.signal_names():
-            if existing_name not in enabled_names:
-                self.plot_widget.remove_signal(existing_name)
+    def _close_active_panel(self) -> None:
+        active = self._workspace.active_panel()
+        if active is not None:
+            self._workspace.close_panel(active)
 
-    def _on_data_name_changed(self, field_key: str, new_name: str) -> None:
-        # Display-name-only remap; underlying Data1..Data8 packet keys are
-        # never touched. Extend here if display names should propagate
-        # elsewhere in the GUI (e.g. into signal source pickers).
-        pass
-
-    # -- plotting -------------------------------------------------------------
-    def _refresh_plot(self) -> None:
-        for cfg in self.signal_panel.get_configs():
-            if not cfg.enabled:
-                continue
-            t, y = self._signal_manager.get_plot_data(cfg.name)
-            if t is not None:
-                self.plot_widget.update_signal_data(cfg.name, t, y)
-
-    def _on_clear_graph(self) -> None:
-        self._signal_manager.clear_all()
-        self.plot_widget.clear()
+    def _on_clear_active_panel(self) -> None:
+        active = self._workspace.active_panel()
+        if active is not None:
+            active.clear()
+            self.statusBar().showMessage("Active panel cleared.", 3000)
 
     # -- configuration persistence -----------------------------------------------
     def _current_app_config(self) -> AppConfig:
+        panels = [
+            PanelConfig(signals=panel.get_configs())
+            for panel in self._workspace.panels()
+        ]
         return AppConfig(
-            serial_port=self.serial_panel.port_combo.currentText(),
-            baud_rate=int(self.serial_panel.baud_combo.currentText() or 115200),
-            signals=self.signal_panel.get_configs(),
-            data_field_names={
-                self.data_table.item(row, 0).text(): self.data_table.item(row, 2).text()
-                for row in range(self.data_table.rowCount())
-            },
+            serial_port=self._serial_port,
+            baud_rate=self._baud_rate,
+            panels=panels,
         )
 
     def _apply_app_config(self, config: AppConfig) -> None:
-        idx = self.serial_panel.port_combo.findText(config.serial_port)
-        if idx >= 0:
-            self.serial_panel.port_combo.setCurrentIndex(idx)
-        elif config.serial_port:
-            self.serial_panel.port_combo.setCurrentText(config.serial_port)
-        self.serial_panel.baud_combo.setCurrentText(str(config.baud_rate))
-        self.signal_panel.set_configs(config.signals)
-        self.data_table.set_display_names(config.data_field_names)
-        self._on_signals_changed()
+        self._serial_port = config.serial_port
+        self._baud_rate = int(config.baud_rate or 115200)
+        self._render_status_label(self._serial.is_connected)
+        self._workspace.rebuild([panel.signals for panel in config.panels])
 
     def _on_save_config(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
@@ -222,10 +269,21 @@ class MainWindow(QMainWindow):
     def _on_reset_config(self) -> None:
         reply = QMessageBox.question(
             self, "Reset Configuration",
-            "Discard all signals and reset serial settings?",
+            "Discard all signal configuration and serial settings?",
         )
         if reply == QMessageBox.Yes:
             self._apply_app_config(ConfigManager.default())
+
+    # -- global "active panel" tracking -------------------------------------------
+    def eventFilter(self, obj, event) -> bool:
+        if event.type() in (QEvent.MouseButtonPress, QEvent.FocusIn):
+            node = obj if isinstance(obj, QWidget) else None
+            while isinstance(node, QWidget):
+                if isinstance(node, GraphPanel):
+                    self._workspace.set_active_panel(node)
+                    break
+                node = node.parentWidget()
+        return super().eventFilter(obj, event)
 
     def closeEvent(self, event) -> None:
         self._serial.disconnect()

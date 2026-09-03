@@ -1,11 +1,11 @@
-"""Single shared-time-axis plot supporting an independent Y-axis per
+"""One shared-time-axis plot supporting an independent Y-axis per
 enabled signal.
 
-Only one graph ever exists - we never create per-signal PlotWidgets, per
-spec. Multiple independent Y-axes on one shared X (time) axis are
-implemented with pyqtgraph's standard "multiple ViewBoxes layered on one
-PlotItem" pattern (the same technique used in pyqtgraph's own
-"MultiplePlotAxes" example):
+Each panel owns one PlotWidget instance (a "single graph" widget). Per
+signal we never create a separate PlotWidget - instead, multiple
+independent Y-axes on one shared X (time) axis are implemented with
+pyqtgraph's standard "multiple ViewBoxes layered on one PlotItem" pattern
+(the same technique used in pyqtgraph's own "MultiplePlotAxes" example):
 
 - One base `PlotItem` supplies the shared X axis, grid, and legend.
 - Every additional enabled signal gets its own `pg.ViewBox` (not a new

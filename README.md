@@ -11,18 +11,42 @@ cd app
 python main.py
 ```
 
+## GUI structure
+
+The window is a multi-panel workspace (like a simple VS Code layout):
+
+- **Menus**: `File` (save/load/reset configuration, clear the active
+  panel), `Serial` (Connect / Disconnect / Configuration...), `Panel`
+  (add/split/close the active panel).
+- **Serial configuration lives in its own dialog** (`Serial >
+  Configuration...`), separate from the graph/data area. Saved settings
+  apply on the next Connect. Connection status shows in the status bar.
+- **Panels**: every open panel is an independent analysis view with its
+  own signal configuration, processor state, plot, and Name/Value readout.
+  Split panels side-by-side (drag the divider to resize); each panel's
+  `...` menu and the `Panel` menu do the same. The last panel can't be
+  closed.
+- **Inside a panel** there are two tabs: *Plot* (narrow Name/Value table
+  on the left showing that panel's enabled signal outputs, graph on the
+  right) and *Signal Configuration* (that panel's signal table). Editing
+  one panel's signals never affects another panel.
+- **Packets** are fanned out to every panel; each panel computes only its
+  own enabled signals on a shared, throttled (50 ms) plot-refresh timer.
+
 ## Project layout
 
 ```
 app/
 ├── main.py
 ├── gui/
-│   ├── main_window.py     # wires everything together; owns no serial/parsing logic
-│   ├── serial_panel.py    # port/baud/connect/disconnect/status
-│   ├── signal_panel.py    # signal list table + add/edit/delete/enable
-│   ├── signal_dialog.py   # add/edit dialog, form adapts to signal type
-│   ├── data_table.py      # Data1-8 live values + renameable display names
-│   └── plot_widget.py     # ONE graph, shared time axis, per-signal Y-axis
+│   ├── main_window.py        # hub: menus, serial lifecycle, packet fan-out to panels
+│   ├── workspace.py          # recursive splitter container (VS Code-like panes)
+│   ├── graph_panel.py        # one analysis panel: Plot + Signal Configuration tabs
+│   ├── serial_config_dialog.py  # port/baud settings dialog (separate from graph UI)
+│   ├── live_value_table.py   # narrow Name/Value readout of the panel's signal outputs
+│   ├── signal_panel.py       # per-panel signal list table + add/edit/delete/enable
+│   ├── signal_dialog.py      # add/edit dialog, form adapts to signal type
+│   └── plot_widget.py        # one graph per panel, shared time axis, per-signal Y-axis
 ├── serial_io/
 │   ├── serial_manager.py  # QThread-based serial I/O, never blocks the GUI
 │   └── packet_parser.py   # framing (isolated) + endianness/sign decoding
