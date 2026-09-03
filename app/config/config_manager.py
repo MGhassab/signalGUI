@@ -42,6 +42,8 @@ class ConfigManager:
 
         panels_payload = payload.get("panels")
         if panels_payload is not None:
+            # Explicit list: may be empty (valid - the user can have zero
+            # panels open), or contain one entry per saved panel window.
             panels = [
                 PanelConfig(
                     signals=[signal_config_from_dict(s) for s in panel.get("signals", [])]
@@ -55,8 +57,6 @@ class ConfigManager:
                 signals=[signal_config_from_dict(s) for s in legacy_signals]
             )]
 
-        if not panels:
-            panels = [PanelConfig()]
         return AppConfig(
             serial_port=serial_port,
             baud_rate=baud_rate,

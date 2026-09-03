@@ -1,4 +1,4 @@
-"""One independent analysis panel (a "workspace leaf").
+"""One independent analysis panel.
 
 A single `GraphPanel` owns everything that makes up one analysis view so
 panels never share mutable state:
@@ -15,18 +15,20 @@ readout on the left and the graph on the right (draggable divider). The
 Signal Configuration tab edits *this* panel's signals only - changing one
 panel never affects another.
 
-All packets are delivered to every panel (see MainWindow.on_packet); each
-panel computes only its own enabled signals. Plot redraws are throttled
-by a shared timer in MainWindow calling `refresh_plot()`.
+A `GraphPanel` is a *content* widget with no lifecycle of its own: it is
+hosted inside a `PanelWindow` (a top-level child tool window) that the
+main window creates/registers/closes. Packets are delivered to every open
+panel (see MainWindow.on_packet); each panel computes only its own enabled
+signals. Plot redraws are throttled by a shared timer in MainWindow
+calling `refresh_plot()`.
 """
 from __future__ import annotations
 
 from typing import List
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QTabWidget,
-    QToolButton, QMenu,
+    QWidget, QVBoxLayout, QSplitter, QTabWidget,
 )
 
 from models.packet import Packet
@@ -40,10 +42,6 @@ _INITIAL_TABLE_FRACTION = 0.22
 
 
 class GraphPanel(QWidget):
-    activated = Signal()                  # user interacted with this panel
-    splitRequested = Signal(object)       # Qt.Orientation
-    closeRequested = Signal()
-
     def __init__(self, parent=None):
         super().__init__(parent)
         self._signal_manager = SignalManager()
@@ -52,36 +50,6 @@ class GraphPanel(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
-
-        # -- slim header: panel options menu --------------------------------
-        header = QHBoxLayout()
-        header.setContentsMargins(4, 2, 4, 2)
-        header.addStretch(1)
-
-        self._menu_btn = QToolButton(self)
-        self._menu_btn.setText("\u22ee")  # vertical ellipsis
-        self._menu_btn.setToolTip("Panel options")
-        self._menu_btn.setPopupMode(QToolButton.InstantPopup)
-        self._menu_btn.setAutoRaise(True)
-
-        menu = QMenu(self._menu_btn)
-        split_right = menu.addAction("Split Panel \u2192 Right")
-        split_down = menu.addAction("Split Panel \u2193 Below")
-        menu.addSeparator()
-        self._close_action = menu.addAction("Close Panel")
-        menu.aboutToShow.connect(self.activated)
-
-        split_right.triggered.connect(
-            lambda: self.splitRequested.emit(Qt.Horizontal)
-        )
-        split_down.triggered.connect(
-            lambda: self.splitRequested.emit(Qt.Vertical)
-        )
-        self._close_action.triggered.connect(self.closeRequested)
-        self._menu_btn.setMenu(menu)
-
-        header.addWidget(self._menu_btn)
-        root.addLayout(header)
 
         # -- tabbed body ------------------------------------------------------
         self.tabs = QTabWidget(self)
@@ -152,12 +120,6 @@ class GraphPanel(QWidget):
         self._signal_manager.clear_all()
         self.plot_widget.clear()
         self.value_table.clear_values()
-
-    # -- workspace integration ----------------------------------------------
-    def set_can_close(self, can_close: bool) -> None:
-        self._close_action.setEnabled(can_close)
-        if not can_close:
-            self._close_action.setToolTip("At least one panel is required")
 
     def showEvent(self, event) -> None:
         super().showEvent(event)

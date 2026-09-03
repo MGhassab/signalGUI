@@ -13,25 +13,30 @@ python main.py
 
 ## GUI structure
 
-The window is a multi-panel workspace (like a simple VS Code layout):
+The main window is an application controller/workspace, not a graph panel:
 
+- **Main window** starts with no graph panels: menu bar, a small toolbar
+  (New Panel), an empty-state hint area, and a serial status bar. It owns
+  the single serial connection.
 - **Menus**: `File` (save/load/reset configuration, clear the active
-  panel), `Serial` (Connect / Disconnect / Configuration...), `Panel`
-  (add/split/close the active panel).
-- **Serial configuration lives in its own dialog** (`Serial >
+  panel's graph, exit), `Window` (New Panel, a live list of open panels,
+  Close Panel, Close All Panels), `Settings` (Serial Configuration...,
+  Connect/Disconnect), `Help`.
+- **Panels are independent child tool windows**: open one via `Window >
+  New Panel` (or the toolbar button). Each is a real OS window that can be
+  moved, resized, stacked, overlapped, and arranged freely; closing it
+  removes it from the app's registry and releases it completely (closing
+  the main window closes every panel).
+- **Serial configuration lives in its own dialog** (`Settings > Serial
   Configuration...`), separate from the graph/data area. Saved settings
   apply on the next Connect. Connection status shows in the status bar.
-- **Panels**: every open panel is an independent analysis view with its
-  own signal configuration, processor state, plot, and Name/Value readout.
-  Split panels side-by-side (drag the divider to resize); each panel's
-  `...` menu and the `Panel` menu do the same. The last panel can't be
-  closed.
-- **Inside a panel** there are two tabs: *Plot* (narrow Name/Value table
-  on the left showing that panel's enabled signal outputs, graph on the
-  right) and *Signal Configuration* (that panel's signal table). Editing
-  one panel's signals never affects another panel.
-- **Packets** are fanned out to every panel; each panel computes only its
-  own enabled signals on a shared, throttled (50 ms) plot-refresh timer.
+- **Inside each panel** there are two tabs: *Plot* (a narrow Name/Value
+  table on the left showing that panel's enabled signal outputs, graph on
+  the right - drag the divider to resize) and *Signal Configuration*
+  (that panel's signal table). Each panel owns its own processor state, so
+  editing one panel's signals never affects another panel.
+- **Packets** are fanned out to every open panel; each panel computes only
+  its own enabled signals on a shared, throttled (50 ms) plot-refresh timer.
 
 ## Project layout
 
@@ -39,8 +44,8 @@ The window is a multi-panel workspace (like a simple VS Code layout):
 app/
 ├── main.py
 ├── gui/
-│   ├── main_window.py        # hub: menus, serial lifecycle, packet fan-out to panels
-│   ├── workspace.py          # recursive splitter container (VS Code-like panes)
+│   ├── main_window.py        # controller: menus, serial, panel registry, packet fan-out
+│   ├── panel_window.py       # a graph panel as an independent child tool window
 │   ├── graph_panel.py        # one analysis panel: Plot + Signal Configuration tabs
 │   ├── serial_config_dialog.py  # port/baud settings dialog (separate from graph UI)
 │   ├── live_value_table.py   # narrow Name/Value readout of the panel's signal outputs

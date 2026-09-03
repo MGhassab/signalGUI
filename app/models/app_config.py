@@ -23,4 +23,4 @@ class PanelConfig:
 class AppConfig:
     serial_port: str = ""
     baud_rate: int = 115200
-    panels: List[PanelConfig] = field(default_factory=lambda: [PanelConfig()])
+    panels: List[PanelConfig] = field(default_factory=list)
