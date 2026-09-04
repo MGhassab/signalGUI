@@ -109,6 +109,24 @@ class PlotWidget(pg.GraphicsLayoutWidget):
         if axis:
             axis.view_box.setYRange(y_min, y_max, padding=0)
 
+    def set_y_tick(self, name: str, dy: float) -> None:
+        """Set the major tick step on a signal's Y axis (display only)."""
+        axis = self._axes.get(name)
+        if axis is None:
+            return
+        if dy and dy > 0:
+            axis.axis.setTickSpacing(float(dy), float(dy) / 5.0)
+        else:
+            axis.axis.setTickSpacing()
+
+    def set_time_tick_step(self, dt: float) -> None:
+        """Set the major tick step on the shared time (X) axis (display only)."""
+        bottom = self._plot_item.getAxis("bottom")
+        if dt and dt > 0:
+            bottom.setTickSpacing(float(dt), float(dt) / 5.0)
+        else:
+            bottom.setTickSpacing()
+
     # -- data updates -------------------------------------------------------
     def update_signal_data(self, name: str, t: np.ndarray, y: np.ndarray) -> None:
         axis = self._axes.get(name)

@@ -15,7 +15,15 @@ from models.signal_config import SignalConfig
 
 @dataclass
 class PanelConfig:
-    """Signal configuration belonging to a single graph panel."""
+    """Configuration belonging to a single graph panel.
+
+    `name` is the user-facing panel name (shown in the Panel Manager list
+    and window title); `dt` is the panel's time-axis (X) major tick step in
+    seconds - a display-only setting with no effect on signal values or
+    data acquisition.
+    """
+    name: str = ""
+    dt: float = 1.0
     signals: List[SignalConfig] = field(default_factory=list)
 
 

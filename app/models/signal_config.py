@@ -49,10 +49,11 @@ class Criterion(str, Enum):
 class SignalConfig:
     """Common configuration fields shared by all signal kinds.
 
-    `dt` is a per-signal PROCESSING parameter: the assumed time step used
-    by that signal's own math (e.g. as delta-t in an integral/derivative
-    calculation). It is intentionally NOT the plot's shared time axis and
-    NOT literal serial packet arrival timing - those can differ.
+    `dy` is the per-signal Y-AXIS tick step used only for drawing that
+    signal's axis - it does NOT change the signal's values. There is no
+    per-signal `dt`: each panel owns one display dT (X-axis tick step) and
+    signal math uses measured arrival-time deltas (see
+    processing/computational_processor.py).
     """
     name: str
     source_field: str
@@ -63,7 +64,6 @@ class SignalConfig:
     y_min: float = -1.0
     y_max: float = 1.0
     dy: float = 0.1
-    dt: float = 0.01
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
@@ -105,8 +105,7 @@ class CriteriaSignalConfig(SignalConfig):
     `source_kind == FIELD`; `source_signal` names the configured panel
     signal when `source_kind == SIGNAL`. `gain`/`offset` scale a FIELD
     source the same way RawProcessor would. `y_min`/`y_max` set the plot
-    range of the derived result. The remaining base fields (dy/dt) are
-    unused for criteria signals.
+    range of the derived result; `dy` sets its Y-axis tick step.
     """
 
     source_kind: SourceKind = SourceKind.SIGNAL
@@ -151,6 +150,9 @@ def signal_config_from_dict(d: Dict[str, Any]) -> SignalConfig:
     (as loaded from JSON)."""
     d = dict(d)
     stype = SignalType(d.pop("signal_type"))
+    # `dt` used to be a per-signal field; it was removed (dT is now a
+    # per-panel display setting). Tolerate config files that still contain it.
+    d.pop("dt", None)
     if stype == SignalType.RAW:
         return RawSignalConfig(**d)
     if stype == SignalType.COMPUTATIONAL:

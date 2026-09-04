@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
     QWidget, QGroupBox, QMessageBox,
 )
 
-from models.packet import PACKET_FIELDS, POSITION4_FIELDS
+from models.packet import SIGNAL_FIELDS, POSITION4_FIELDS
 from models.signal_config import (
     SignalConfig, SignalType, SourceKind, Criterion, CriteriaSignalConfig,
 )
@@ -183,7 +183,7 @@ class CriteriaSignalDialog(QDialog):
     # -- combo population / selection helpers ---------------------------------
     def _populate_source_combo(self) -> None:
         signals = self._source_signals
-        channels = PACKET_FIELDS
+        channels = SIGNAL_FIELDS  # DATA1-8 are never selectable sources
 
         if not signals:
             header = self.source_combo
@@ -191,10 +191,7 @@ class CriteriaSignalDialog(QDialog):
             header.setItemData(0, None, Qt.UserRole)
             header.model().item(0).setEnabled(False)
 
-        first_signal: Optional[str] = None
         for s in signals:
-            if first_signal is None:
-                first_signal = s.name
             self.source_combo.addItem(f"Signal: {s.name}", (SourceKind.SIGNAL, s.name))
 
         if signals:
@@ -260,7 +257,6 @@ class CriteriaSignalDialog(QDialog):
             y_min=self.y_min_spin.value(),
             y_max=self.y_max_spin.value(),
             dy=0.1,
-            dt=0.01,
         )
         return CriteriaSignalConfig(
             **common,

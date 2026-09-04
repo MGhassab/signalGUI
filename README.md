@@ -13,28 +13,40 @@ python main.py
 
 ## GUI structure
 
-The main window is an application controller/workspace, not a graph panel:
+The main window is an application controller/panel manager, not a graph
+panel:
 
-- **Main window** starts with no graph panels: menu bar, a small toolbar
-  (New Panel), an empty-state hint area, and a serial status bar. It owns
-  the single serial connection.
+- **Main window** shows the **Panel Manager** list (every created panel +
+  status) with New/Show/Hide/Rename/Delete controls, plus menus, a toolbar,
+  and the serial status bar. It owns the single serial connection.
 - **Menus**: `File` (save/load/reset configuration, clear the active
-  panel's graph, exit), `Window` (New Panel, a live list of open panels,
-  Close Panel, Close All Panels), `Settings` (Serial Configuration...,
-  Connect/Disconnect), `Help`.
+  panel's graph, exit), `Window` (New Panel, a live list of panels, Hide
+  Panel, Delete Panel), `Settings` (Serial Configuration..., Connect/
+  Disconnect), `Help`.
 - **Panels are independent child tool windows**: open one via `Window >
-  New Panel` (or the toolbar button). Each is a real OS window that can be
-  moved, resized, stacked, overlapped, and arranged freely; closing it
-  removes it from the app's registry and releases it completely (closing
-  the main window closes every panel).
-- **Serial configuration lives in its own dialog** (`Settings > Serial
-  Configuration...`), separate from the graph/data area. Saved settings
-  apply on the next Connect. Connection status shows in the status bar.
-- **Inside each panel** there are two tabs: *Plot* (a narrow Name/Value
-  table on the left showing that panel's enabled signal outputs, graph on
-  the right - drag the divider to resize) and *Signal Configuration*
-  (that panel's signal table). Each panel owns its own processor state, so
-  editing one panel's signals never affects another panel.
+  New Panel` (toolbar or Panel Manager). Each is a real OS window that can
+  be moved, resized, stacked and overlapped freely. Pressing its **X (or
+  Hide) only hides it** - it stays registered with all config/data intact
+  and can be reopened from the Panel Manager. **Delete** really removes it.
+  Closing/hiding a panel never closes the Main Window.
+- **Per-panel playback**: each panel has its own Play/Pause toggle plus
+  Previous/Next/Latest navigation. Pause freezes that panel's displayed
+  view (data acquisition and history continue); you can step backward /
+  forward through the retained history or jump back to live. Pausing one
+  panel never affects another.
+- **Left data table**: DATA1-DATA8 (raw, display-only, always on top) then
+  the panel's enabled signal outputs. DATA1-8 are never user-selectable
+  signals or criteria sources - they only appear here.
+- **Display settings**: `dY` (per signal) and `dT` (per panel, in the
+  panel control row) are axis-tick steps only - they change neither signal
+  values nor data acquisition.
+- **Serial configuration** lives in its own dialog (`Settings > Serial
+  Configuration...`); saved settings apply on the next Connect. Connection
+  status shows in the status bar.
+- **Inside each panel** there are two tabs: *Plot* (Name/Value table +
+  graph) and *Signal Configuration* (that panel's signal table). Each panel
+  owns its own processor state, so editing one panel's signals never
+  affects another panel.
 - **Packets** are fanned out to every open panel; each panel computes only
   its own enabled signals on a shared, throttled (50 ms) plot-refresh timer.
 
@@ -45,10 +57,12 @@ app/
 ├── main.py
 ├── gui/
 │   ├── main_window.py        # controller: menus, serial, panel registry, packet fan-out
+│   ├── panel_manager.py      # Main-Window list of panels (new/show/hide/rename/delete)
 │   ├── panel_window.py       # a graph panel as an independent child tool window
 │   ├── graph_panel.py        # one analysis panel: Plot + Signal Configuration tabs
+│   ├── playback_controller.py# per-panel Play/Pause + history navigation state
 │   ├── serial_config_dialog.py  # port/baud settings dialog (separate from graph UI)
-│   ├── live_value_table.py   # narrow Name/Value readout of the panel's signal outputs
+│   ├── live_value_table.py   # DATA1-8 + panel signal outputs (Name/Value readout)
 │   ├── signal_panel.py       # per-panel signal list table + add/edit/delete/enable
 │   ├── signal_dialog.py      # add/edit dialog (Raw/Computational signals)
 │   ├── criteria_dialog.py    # criteria (derived metric) configuration dialog

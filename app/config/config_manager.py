@@ -5,7 +5,7 @@ The current JSON schema is:
     {
       "serial_port": "...",
       "baud_rate": 115200,
-      "panels": [ {"signals": [ ... ]}, ... ]
+      "panels": [ {"name": "...", "dt": 1.0, "signals": [ ... ]}, ... ]
     }
 
 For backward compatibility, files written by the pre-multi-panel app
@@ -28,7 +28,11 @@ class ConfigManager:
             "serial_port": config.serial_port,
             "baud_rate": config.baud_rate,
             "panels": [
-                {"signals": [s.to_dict() for s in panel.signals]}
+                {
+                    "name": panel.name,
+                    "dt": panel.dt,
+                    "signals": [s.to_dict() for s in panel.signals],
+                }
                 for panel in config.panels
             ],
         }
@@ -46,7 +50,10 @@ class ConfigManager:
             # panels open), or contain one entry per saved panel window.
             panels = [
                 PanelConfig(
-                    signals=[signal_config_from_dict(s) for s in panel.get("signals", [])]
+                    name=panel.get("name", ""),
+                    dt=panel.get("dt", 1.0),
+                    signals=[signal_config_from_dict(s)
+                             for s in panel.get("signals", [])],
                 )
                 for panel in panels_payload
             ]

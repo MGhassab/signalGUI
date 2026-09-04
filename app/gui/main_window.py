@@ -1,21 +1,20 @@
-"""Main application window: an application controller / workspace.
+"""Main application window: application controller / panel manager.
 
-The main window is NOT a graph panel. It provides the application-level
-chrome (menus, toolbar, empty workspace area, connection status) and owns
-the single serial connection. Graph panels live in independent child tool
-windows (`PanelWindow`) that the user opens from here.
+The main window is NOT a graph panel. It shows the panel manager list and
+owns the app-level chrome (menus, toolbar, serial status). Graph panels
+live in independent child tool windows (`PanelWindow`) registered here.
 
 Responsibilities:
 
-- serial lifecycle (one `SerialManager` for the whole app),
-- creating / closing / tracking `PanelWindow`s (the registry),
-- menus: File / Window / Settings / Help, plus a connection status label,
-- fanning every decoded packet out to all open panel windows,
+- the authoritative panel registry (`self._panels`),
+- creating, hiding, reopening, renaming, deleting panels,
+- menus: File / Window / Settings / Help + connection status,
+- the single serial connection and packet fan-out to every registered panel,
 - one shared, throttled plot-refresh timer.
 
-Each `PanelWindow` owns its own `SignalManager`/plot/signal-config, so all
-signal processing stays per-panel. The GUI never touches serial bytes or
-packet parsing directly - it only receives fully-formed `Packet` objects.
+Each `PanelWindow`/`GraphPanel` owns its own signal processing, playback
+state, and data table, so panels are fully independent. The GUI never
+touches serial bytes or packet parsing directly.
 """
 from __future__ import annotations
 
@@ -23,10 +22,11 @@ from typing import List, Optional
 
 from PySide6.QtCore import Qt, QEvent, QPoint, QTimer, Slot
 from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QPushButton, QLabel,
-    QMessageBox, QFileDialog, QStatusBar,
+    QApplication, QMainWindow, QWidget, QInputDialog, QMessageBox,
+    QFileDialog, QStatusBar, QLabel,
 )
 
+from gui.panel_manager import PanelManagerWidget
 from gui.panel_window import PanelWindow
 from gui.serial_config_dialog import prompt_serial_config
 
@@ -61,8 +61,8 @@ class MainWindow(QMainWindow):
         self._closing = False
 
         self._build_ui()
-        self._build_menu()
         self._wire_signals()
+        self._build_menu()
         self._update_serial_actions()
 
         app = QApplication.instance()
@@ -78,35 +78,8 @@ class MainWindow(QMainWindow):
 
     # -- UI construction ----------------------------------------------------
     def _build_ui(self) -> None:
-        empty = QWidget()
-        self.setCentralWidget(empty)
-        layout = QVBoxLayout(empty)
-        layout.addStretch(1)
-
-        title = QLabel("Embedded Device Monitor")
-        title.setAlignment(Qt.AlignCenter)
-        f = title.font()
-        f.setPointSize(20)
-        f.setBold(True)
-        title.setFont(f)
-        layout.addWidget(title)
-
-        hint = QLabel(
-            "No graph panels are open.\n"
-            "Use Window \u2192 New Panel (or the button below) to open one."
-        )
-        hint.setAlignment(Qt.AlignCenter)
-        hint.setStyleSheet("color: #888;")
-        layout.addWidget(hint)
-        layout.addSpacing(12)
-
-        new_btn = QPushButton("+ New Panel")
-        new_btn.setFixedWidth(160)
-        new_btn.clicked.connect(lambda: self.new_panel())
-        row = QVBoxLayout()
-        row.addWidget(new_btn, alignment=Qt.AlignCenter)
-        layout.addLayout(row)
-        layout.addStretch(2)
+        self.panel_manager = PanelManagerWidget()
+        self.setCentralWidget(self.panel_manager)
 
         status_bar = QStatusBar()
         self.setStatusBar(status_bar)
@@ -135,11 +108,11 @@ class MainWindow(QMainWindow):
         self._win_sep = window_menu.addSeparator()
         self._window_actions: List[object] = []  # dynamic per-panel entries
         self._win_sep2 = window_menu.addSeparator()
-        self._close_panel_action = window_menu.addAction("&Close Panel")
-        self._close_panel_action.triggered.connect(self._close_active_panel)
-        self._close_all_action = window_menu.addAction("Close &All Panels")
-        self._close_all_action.triggered.connect(self._close_all_panels)
-        self._rebuild_window_menu()
+        self._hide_action = window_menu.addAction("&Hide Panel")
+        self._hide_action.triggered.connect(self._hide_active_panel)
+        self._delete_action = window_menu.addAction("&Delete Panel")
+        self._delete_action.triggered.connect(self._delete_active_panel)
+        self._refresh_panel_ui()
 
         # Toolbar: reuse the same "New Panel" action.
         self.addToolBar("Main").addAction(self._new_panel_action)
@@ -163,80 +136,133 @@ class MainWindow(QMainWindow):
         self._serial.errorOccurred.connect(self._on_serial_error)
         self._serial.packetReceived.connect(self._on_packet)
 
-    # -- panel lifecycle (registry) ---------------------------------------------
-    def new_panel(self, signals: Optional[List] = None) -> PanelWindow:
+        self.panel_manager.newRequested.connect(lambda: self.new_panel())
+        self.panel_manager.showRequested.connect(self._manager_show)
+        self.panel_manager.hideRequested.connect(self._manager_hide)
+        self.panel_manager.renameRequested.connect(self._manager_rename)
+        self.panel_manager.deleteRequested.connect(self._manager_delete)
+
+    # -- panel registry --------------------------------------------------------
+    def new_panel(self, signals: Optional[List] = None,
+                  name: Optional[str] = None,
+                  time_step: Optional[float] = None) -> PanelWindow:
         """Open a new independent panel window and register it."""
-        self._panel_counter += 1
-        title = f"Panel {self._panel_counter}"
-        window = PanelWindow(self, title, signals=signals)
+        if name:
+            title = name
+        else:
+            self._panel_counter += 1
+            title = f"Panel {self._panel_counter}"
+            while any(p.panel_name() == title for p in self._panels):
+                self._panel_counter += 1
+                title = f"Panel {self._panel_counter}"
 
+        window = PanelWindow(
+            self, title,
+            signals=signals,
+            time_step=time_step if time_step is not None else 1.0,
+        )
         self._panels.append(window)
-        self._rebuild_window_menu()
+        self._refresh_panel_ui()
 
-        # Cascade the new window relative to the main window so consecutive
-        # panels do not stack perfectly on top of each other.
         base = self.frameGeometry().topLeft()
         offset = (len(self._panels) - 1) % 8
         window.move(base + QPoint(40 + 26 * offset, 40 + 26 * offset))
-
-        window.show()
-        self._activate_panel(window)
+        window.show_panel()
+        self._last_active = window
         if not self._closing:
             self.statusBar().showMessage(f"{title} opened.", 3000)
         return window
 
-    def _close_active_panel(self) -> None:
-        window = self._last_active
-        if window is not None:
-            window.close()
+    # -- manager actions --------------------------------------------------------
+    def _manager_show(self, window: PanelWindow) -> None:
+        self._last_active = window
+        window.show_panel()
 
-    def _close_all_panels(self) -> None:
-        for window in list(self._panels):
-            window.close()
+    def _manager_hide(self, window: PanelWindow) -> None:
+        window.hide_panel()
+
+    def _manager_rename(self, window: PanelWindow) -> None:
+        current = window.panel_name()
+        new_name, ok = QInputDialog.getText(
+            self, "Rename Panel", "Panel name:", text=current
+        )
+        new_name = new_name.strip()
+        if ok and new_name and new_name != current:
+            window.rename(new_name)
+            self._refresh_panel_ui()
+            self.statusBar().showMessage(
+                f"Panel renamed to '{new_name}'.", 3000
+            )
+
+    def _manager_delete(self, window: PanelWindow) -> None:
+        window.destroy_panel()
+
+    def _hide_active_panel(self) -> None:
+        window = self._last_active or (self._panels[0] if self._panels else None)
+        if window is not None:
+            window.hide_panel()
+
+    def _delete_active_panel(self) -> None:
+        window = self._last_active or (self._panels[0] if self._panels else None)
+        if window is not None:
+            window.destroy_panel()
+
+    def _on_clear_active_panel(self) -> None:
+        window = self._last_active or (self._panels[0] if self._panels else None)
+        if window is not None:
+            window.clear()
+            self.statusBar().showMessage(
+                f"{window.panel_name()} cleared.", 3000
+            )
+
+    def _on_panel_hidden(self, window: PanelWindow) -> None:
+        """Panel window X pressed / hidden: stays registered."""
+        self._refresh_panel_ui()
 
     def _on_panel_closed(self, window: PanelWindow) -> None:
-        """Called by PanelWindow.closeEvent before the window is destroyed."""
+        """A panel was really destroyed - remove it from the registry."""
         if window in self._panels:
             self._panels.remove(window)
         if self._last_active is window:
             self._last_active = None
-        self._rebuild_window_menu()
+        self._refresh_panel_ui()
 
-    def _activate_panel(self, window: PanelWindow) -> None:
-        self._last_active = window
-        window.show()
-        window.raise_()
-        window.activateWindow()
+    # -- UI refresh -------------------------------------------------------------
+    @staticmethod
+    def _panel_label(window: PanelWindow) -> str:
+        paused = window.panel.playback().is_paused()
+        tag = "paused" if paused else "live"
+        if not window.isVisible():
+            tag += ", hidden"
+        return f"{window.panel_name()}  [{tag}]"
 
-    # -- Window menu -------------------------------------------------------------
-    def _rebuild_window_menu(self) -> None:
-        # Rebuild the dynamic (per-panel) section of the Window menu in place
-        # so the static actions (New Panel / Close / Close All) stay put.
-        window_menu = self._window_menu
+    def _refresh_panel_ui(self) -> None:
+        # Panel Manager list
+        self.panel_manager.refresh(
+            [(w, self._panel_label(w)) for w in self._panels]
+        )
+
+        # Window menu dynamic section
+        menu = self._window_menu
         for action in self._window_actions:
-            window_menu.removeAction(action)
+            menu.removeAction(action)
             action.deleteLater()
         self._window_actions = []
-
         if not self._panels:
-            placeholder = window_menu.addAction("(no panels open)")
+            placeholder = menu.addAction("(no panels open)")
             placeholder.setEnabled(False)
             self._window_actions.append(placeholder)
         else:
             for window in self._panels:
-                action = window_menu.addAction(window.windowTitle())
+                action = menu.addAction(self._panel_label(window))
                 action.triggered.connect(
-                    lambda _checked=False, w=window: self._activate_panel(w)
+                    lambda _checked=False, w=window: self._manager_show(w)
                 )
                 self._window_actions.append(action)
-        self._update_panel_actions()
 
-    def _update_panel_actions(self) -> None:
         any_open = bool(self._panels)
-        self._close_panel_action.setEnabled(
-            self._last_active is not None
-        )
-        self._close_all_action.setEnabled(any_open)
+        self._hide_action.setEnabled(any_open)
+        self._delete_action.setEnabled(any_open)
 
     # -- serial connection lifecycle -----------------------------------------
     def _on_serial_config(self) -> None:
@@ -301,18 +327,14 @@ class MainWindow(QMainWindow):
         for window in list(self._panels):
             window.refresh_plot()
 
-    def _on_clear_active_panel(self) -> None:
-        window = self._last_active
-        if window is not None:
-            window.clear()
-            self.statusBar().showMessage(
-                f"{window.windowTitle()} cleared.", 3000
-            )
-
     # -- configuration persistence -----------------------------------------------
     def _current_app_config(self) -> AppConfig:
         panels = [
-            PanelConfig(signals=window.get_configs())
+            PanelConfig(
+                name=window.panel_name(),
+                dt=window.get_time_step(),
+                signals=window.get_configs(),
+            )
             for window in self._panels
         ]
         return AppConfig(
@@ -325,9 +347,14 @@ class MainWindow(QMainWindow):
         self._serial_port = config.serial_port
         self._baud_rate = int(config.baud_rate or 115200)
         self._render_status_label(self._serial.is_connected)
-        self._close_all_panels()
+        for window in list(self._panels):
+            window.destroy_panel()
         for panel in config.panels:
-            self.new_panel(signals=panel.signals)
+            self.new_panel(
+                signals=panel.signals,
+                name=panel.name or None,
+                time_step=panel.dt,
+            )
 
     def _on_save_config(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
@@ -359,7 +386,7 @@ class MainWindow(QMainWindow):
     def _on_reset_config(self) -> None:
         reply = QMessageBox.question(
             self, "Reset Configuration",
-            "Discard all signal configuration, close all panels, "
+            "Discard all configuration, delete all panels, "
             "and reset serial settings?",
         )
         if reply == QMessageBox.Yes:
@@ -381,7 +408,6 @@ class MainWindow(QMainWindow):
                 if isinstance(node, PanelWindow):
                     if self._last_active is not node:
                         self._last_active = node
-                        self._update_panel_actions()
                     break
                 node = node.parentWidget()
         return super().eventFilter(obj, event)
@@ -390,5 +416,6 @@ class MainWindow(QMainWindow):
         self._closing = True
         self._plot_timer.stop()
         self._serial.disconnect()
-        self._close_all_panels()
+        for window in list(self._panels):
+            window.destroy_panel()
         super().closeEvent(event)

@@ -24,7 +24,7 @@ from gui.signal_dialog import SignalDialog
 from gui.criteria_dialog import CriteriaSignalDialog, CRITERION_LABELS
 
 COLUMNS = ["Enable", "Name", "Type", "Source", "Gain", "Offset",
-           "Y-Min", "Y-Max", "dY", "dT", "Details"]
+           "Y-Min", "Y-Max", "dY", "Details"]
 
 _TYPE_LABELS = {
     SignalType.RAW: "Raw",
@@ -117,7 +117,7 @@ class SignalPanel(QWidget):
             _TYPE_LABELS[SignalType(cfg.signal_type)],
             cfg.source_field,
             f"{cfg.gain:g}", f"{cfg.offset:g}", f"{cfg.y_min:g}",
-            f"{cfg.y_max:g}", f"{cfg.dy:g}", f"{cfg.dt:g}",
+            f"{cfg.y_max:g}", f"{cfg.dy:g}",
             "",
         ]
 
@@ -145,7 +145,7 @@ class SignalPanel(QWidget):
             _TYPE_LABELS[SignalType.CRITERIA],
             cfg.source_label,
             _PARAM_BLANK, _PARAM_BLANK,
-            f"{cfg.y_min:g}", f"{cfg.y_max:g}", _PARAM_BLANK, _PARAM_BLANK,
+            f"{cfg.y_min:g}", f"{cfg.y_max:g}", _PARAM_BLANK,
             summary,
         ]
 

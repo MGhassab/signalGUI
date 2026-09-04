@@ -1,9 +1,10 @@
 """Add/Edit dialog for one Raw or Computational signal configuration.
 
 The form adapts to the selected signal type via a QStackedWidget: common
-fields (name, source, gain, offset, y-range, dY, dT) are always shown;
+fields (name, source, gain, offset, y-range, dY) are always shown;
 type-specific fields (operation/x-degree) appear on a second, type-
-dependent panel below.
+dependent panel below. There is no per-signal dT (dT is a per-panel
+display setting), and DATA1-8 are not selectable sources.
 
 Criteria signals are NOT edited here - they use `CriteriaSignalDialog`
 (see gui/criteria_dialog.py) because they need a source/reference pair,
@@ -19,7 +20,7 @@ from PySide6.QtWidgets import (
     QWidget, QGroupBox
 )
 
-from models.packet import PACKET_FIELDS
+from models.packet import SIGNAL_FIELDS
 from models.signal_config import (
     SignalConfig, SignalType, Operation,
     RawSignalConfig, ComputationalSignalConfig,
@@ -59,7 +60,7 @@ class SignalDialog(QDialog):
         common_form.addRow("Type:", self.type_combo)
 
         self.source_combo = QComboBox()
-        self.source_combo.addItems(PACKET_FIELDS)
+        self.source_combo.addItems(SIGNAL_FIELDS)
         common_form.addRow("Source field:", self.source_combo)
 
         self.enabled_check = QCheckBox("Enabled")
@@ -75,9 +76,7 @@ class SignalDialog(QDialog):
         self.y_max_spin = _double_spin(value=1.0)
         common_form.addRow("Y-max:", self.y_max_spin)
         self.dy_spin = _double_spin(minimum=1e-9, value=0.1)
-        common_form.addRow("dY:", self.dy_spin)
-        self.dt_spin = _double_spin(minimum=1e-9, value=0.01)
-        common_form.addRow("dT:", self.dt_spin)
+        common_form.addRow("dY (Y-axis tick step):", self.dy_spin)
 
         outer.addWidget(common_group)
 
@@ -136,7 +135,6 @@ class SignalDialog(QDialog):
         self.y_min_spin.setValue(cfg.y_min)
         self.y_max_spin.setValue(cfg.y_max)
         self.dy_spin.setValue(cfg.dy)
-        self.dt_spin.setValue(cfg.dt)
 
         if isinstance(cfg, ComputationalSignalConfig):
             op_idx = self.operation_combo.findData(Operation(cfg.operation))
@@ -164,7 +162,6 @@ class SignalDialog(QDialog):
             y_min=self.y_min_spin.value(),
             y_max=self.y_max_spin.value(),
             dy=self.dy_spin.value(),
-            dt=self.dt_spin.value(),
         )
         stype = self.type_combo.currentData()
         if stype == SignalType.RAW:

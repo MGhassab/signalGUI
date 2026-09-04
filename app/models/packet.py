@@ -42,6 +42,11 @@ DATA_FIELDS: List[str] = [f"Data{i}" for i in range(1, 9)]
 # signal's REFERENCE (see models/signal_config.py).
 POSITION4_FIELDS: List[str] = [f"position4{i}" for i in range(1, 5)]
 
+# Fields that MAY be used as a normal signal's source / a criteria SOURCE.
+# DATA1..DATA8 are deliberately excluded: they are raw/auxiliary display-only
+# values (left data table), never user-selectable signals.
+SIGNAL_FIELDS: List[str] = [f for f in PACKET_FIELDS if f not in DATA_FIELDS]
+
 assert len(PACKET_FIELDS) == 42, "Packet layout must have exactly 42 fields"
 assert all(f in PACKET_FIELDS for f in POSITION4_FIELDS)
 
