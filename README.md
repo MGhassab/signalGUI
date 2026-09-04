@@ -129,9 +129,18 @@ inside the app.
    wasn't requested.
 
 4. **Integral/Derivative numerics** (not specified, so documented in
-   code): trapezoidal integration, backward-difference derivative,
-   `x_degree` reapplies the operation that many times. First-sample /
-   zero-`dt` cases return `0.0` instead of NaN/crashing.
+   code): trapezoidal integration for Integral; Derivative is a real-time
+   Savitzky-Golay-style differentiator - a least-squares quadratic is fit
+   to the last W `(measured_time, value)` samples and the slope is reported
+   at the window CENTER (phase/amplitude-accurate, robust to the integer
+   quantization of the device stream and to irregular arrival times).
+   `x_degree` reapplies the operation that many times; derivative stages
+   cascade, with window sizes 5, 7, 9, ... growing per degree. Derivative
+   output samples are stamped with their center time, so the trace stays
+   aligned on the global X axis at the cost of a fixed group delay
+   (~0.1 s for a 1st derivative, ~0.25 s for a 2nd at 20 Hz - the newest
+   samples simply aren't drawn yet). Insufficient-history / zero-`dt` cases
+   emit no sample instead of NaN/crashing, so there are no startup spikes.
 
 5. **Criteria signals are derived Source->Reference metrics.** A Criteria
    row compares one SOURCE (a configured signal or a raw channel) against

@@ -152,9 +152,13 @@ class SignalManager:
                 raw_value = packet.get(rt.config.source_field)
             except KeyError:
                 continue
-            output = rt.processor.process(raw_value, t)
-            rt.time_buffer.append(t)
-            rt.value_buffer.append(output)
+            # A processor yields zero-or-more completed (sample_time, value)
+            # outputs. Most yield one immediately at `t`; a centered
+            # derivative yields its sample some samples later, stamped with
+            # its own (earlier) center time so it stays time-aligned.
+            for out_t, output in rt.processor.process(raw_value, t):
+                rt.time_buffer.append(out_t)
+                rt.value_buffer.append(output)
 
         # Pass 2: derived criteria signals (source signals already updated).
         for rt in self._runtimes.values():
