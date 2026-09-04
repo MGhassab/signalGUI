@@ -160,10 +160,12 @@ class GraphPanel(QWidget):
         enabled_names = {c.name for c in enabled}
         for cfg in enabled:
             derived = SignalType(cfg.signal_type) == SignalType.CRITERIA
-            self.plot_widget.add_or_update_signal(
-                cfg.name, cfg.y_min, cfg.y_max, derived=derived
+            # Applies configured y_min/y_max/dY only when this signal's own
+            # axis config actually changed; never resets manually-adjusted
+            # axes on unrelated updates or real-time refreshes.
+            self.plot_widget.sync_axis_config(
+                cfg.name, cfg.y_min, cfg.y_max, cfg.dy, derived=derived
             )
-            self.plot_widget.set_y_tick(cfg.name, cfg.dy)
         for existing in self.plot_widget.signal_names():
             if existing not in enabled_names:
                 self.plot_widget.remove_signal(existing)

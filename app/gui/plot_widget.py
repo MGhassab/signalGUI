@@ -14,6 +14,22 @@ pyqtgraph's standard "multiple ViewBoxes layered on one PlotItem" pattern
   each signal have a completely different Y range/scale while staying on
   one graph and one shared time vector.
 
+Axis configuration vs. live plot state
+--------------------------------------
+Signal configuration (y_min / y_max / dY) is applied to an axis ONLY when
+that axis' configuration actually changes (`sync_axis_config` compares a
+recorded "applied" tuple and is otherwise a no-op). The real-time update
+loop only feeds curve data + the shared X range; it never reconfigures any
+axis, so manual user adjustments (mouse wheel / pan) are never overwritten
+by incoming data.
+
+Tick spacing (dY / dT) is applied once when the configuration is applied.
+On the FIRST manual wheel/pan on an axis the fixed tick override is
+released to pyqtgraph's adaptive tick engine (via `sigRangeChangedManually`).
+This keeps the configured step as the initial scale while guaranteeing that
+zooming outward never explodes the number of forced tick labels (which is
+what previously froze the UI).
+
 Redraws only update the curve data for the signal(s) that changed
 (`setData` on an existing PlotCurveItem) - the whole scene is never
 rebuilt on every packet, and a bounded ring buffer (see
@@ -22,7 +38,7 @@ limit.
 """
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pyqtgraph as pg
@@ -64,21 +80,40 @@ class PlotWidget(pg.GraphicsLayoutWidget):
         self._legend = self._plot_item.addLegend(offset=(10, 10))
 
         self._axes: Dict[str, _SignalAxis] = {}
+        self._applied: Dict[str, Tuple[float, float, float, bool]] = {}
         self._next_color_idx = 0
         self._window_seconds: float = 30.0  # auto-scrolling time window
 
         self._plot_item.vb.sigResized.connect(self._sync_views)
+        self._plot_item.vb.sigRangeChangedManually.connect(
+            self._on_base_manual_range
+        )
 
-    # -- signal lifecycle -------------------------------------------------
+    # -- axis configuration ---------------------------------------------------
     def signal_names(self) -> List[str]:
         return list(self._axes.keys())
 
-    def add_or_update_signal(self, name: str, y_min: float, y_max: float,
-                             derived: bool = False) -> None:
-        if name in self._axes:
-            self._axes[name].view_box.setYRange(y_min, y_max, padding=0)
+    def sync_axis_config(self, name: str, y_min: float, y_max: float,
+                         dy: float, derived: bool = False) -> None:
+        """Apply signal configuration to an axis, but only when it changed.
+
+        Recorded config == current config => no-op, so unrelated updates
+        (e.g. enabling another signal, or real-time refreshes) never reset
+        an axis that the user may have adjusted manually.
+        """
+        cfg = (float(y_min), float(y_max), float(dy), bool(derived))
+        if name in self._axes and self._applied.get(name) == cfg:
             return
 
+        if name not in self._axes:
+            self._add_signal(name, y_min, y_max, derived)
+        else:
+            self._axes[name].view_box.setYRange(y_min, y_max, padding=0)
+        self._apply_y_tick_override(name, dy)
+        self._applied[name] = cfg
+
+    def _add_signal(self, name: str, y_min: float, y_max: float,
+                    derived: bool) -> None:
         color = _AXIS_COLORS[self._next_color_idx % len(_AXIS_COLORS)]
         self._next_color_idx += 1
 
@@ -87,6 +122,10 @@ class PlotWidget(pg.GraphicsLayoutWidget):
 
         axis.view_box.setYRange(y_min, y_max, padding=0)
         axis.view_box.setXLink(self._plot_item.vb)
+        # First manual interaction on this axis -> release fixed tick override.
+        axis.view_box.sigRangeChangedManually.connect(
+            lambda _mask, n=name: self._on_signal_manual_range(n)
+        )
 
         col = self.ci.layout.columnCount()
         self.addItem(axis.axis, row=0, col=col)
@@ -98,36 +137,51 @@ class PlotWidget(pg.GraphicsLayoutWidget):
 
     def remove_signal(self, name: str) -> None:
         axis = self._axes.pop(name, None)
+        self._applied.pop(name, None)
         if axis is None:
             return
         self._legend.removeItem(axis.curve)
         self.scene().removeItem(axis.view_box)
         self.removeItem(axis.axis)
 
-    def set_signal_range(self, name: str, y_min: float, y_max: float) -> None:
+    # -- manual interaction: release fixed tick overrides ---------------------
+    def _on_signal_manual_range(self, name: str) -> None:
+        """User wheel/pan on signal axis: keep the manual range but return
+        that axis to adaptive ticks (no more forced spacing)."""
         axis = self._axes.get(name)
-        if axis:
-            axis.view_box.setYRange(y_min, y_max, padding=0)
+        if axis is not None:
+            axis.axis.setTickSpacing()  # -> adaptive
+        self._release_time_ticks()
 
-    def set_y_tick(self, name: str, dy: float) -> None:
-        """Set the major tick step on a signal's Y axis (display only)."""
+    def _on_base_manual_range(self, _mask) -> None:
+        self._release_time_ticks()
+
+    def _release_time_ticks(self) -> None:
+        self._plot_item.getAxis("bottom").setTickSpacing()  # adaptive
+
+    # -- explicit tick application (config-driven only) -----------------------
+    def _apply_y_tick_override(self, name: str, dy: float) -> None:
         axis = self._axes.get(name)
         if axis is None:
             return
         if dy and dy > 0:
-            axis.axis.setTickSpacing(float(dy), float(dy) / 5.0)
+            axis.axis.setTickSpacing(levels=[(float(dy), 0.0)])
         else:
             axis.axis.setTickSpacing()
 
     def set_time_tick_step(self, dt: float) -> None:
-        """Set the major tick step on the shared time (X) axis (display only)."""
+        """Set the major tick step on the shared time (X) axis (display only).
+
+        Only called when the panel's dT configuration is explicitly applied.
+        A manual X interaction releases it back to adaptive ticks.
+        """
         bottom = self._plot_item.getAxis("bottom")
         if dt and dt > 0:
-            bottom.setTickSpacing(float(dt), float(dt) / 5.0)
+            bottom.setTickSpacing(levels=[(float(dt), 0.0)])
         else:
             bottom.setTickSpacing()
 
-    # -- data updates -------------------------------------------------------
+    # -- data updates (real-time; never touches axis config) -------------------
     def update_signal_data(self, name: str, t: np.ndarray, y: np.ndarray) -> None:
         axis = self._axes.get(name)
         if axis is None or t is None or t.size == 0:

@@ -39,7 +39,10 @@ panel:
   signals or criteria sources - they only appear here.
 - **Display settings**: `dY` (per signal) and `dT` (per panel, in the
   panel control row) are axis-tick steps only - they change neither signal
-  values nor data acquisition.
+  values nor data acquisition. They are applied when signal/panel
+  configuration is applied; the first manual mouse-wheel/pan on an axis
+  releases the fixed spacing back to pyqtgraph's adaptive ticks (so manual
+  zoom/pan stays fast and is never overwritten by live data).
 - **Serial configuration** lives in its own dialog (`Settings > Serial
   Configuration...`); saved settings apply on the next Connect. Connection
   status shows in the status bar.
