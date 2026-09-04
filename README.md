@@ -52,12 +52,20 @@ panel:
   affects another panel.
 - **Packets** are fanned out to every open panel; each panel computes only
   its own enabled signals on a shared, throttled (50 ms) plot-refresh timer.
+- **One global acquisition timeline**: every packet receives a single
+  timestamp from the centralized `AcquisitionManager` before it is
+  distributed, so all panels/signals share the same X-axis time reference.
+  A new session (time resets to 0) starts on each serial Connect; creating
+  a panel/signal later never re-zeros time, and new panels backfill the
+  retained global history so side-by-side panels are comparable.
 
 ## Project layout
 
 ```
 app/
 ├── main.py
+├── acquisition/
+│   └── manager.py          # centralized global acquisition timeline + history
 ├── gui/
 │   ├── main_window.py        # controller: menus, serial, panel registry, packet fan-out
 │   ├── panel_manager.py      # Main-Window list of panels (new/show/hide/rename/delete)

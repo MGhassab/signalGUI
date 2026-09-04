@@ -22,7 +22,7 @@ followed by the panel's enabled signal outputs.
 """
 from __future__ import annotations
 
-from typing import List
+from typing import List, Optional
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -200,14 +200,32 @@ class GraphPanel(QWidget):
         self.play_btn.setText("\u25b6" if self._playback.is_paused() else "\u23f8")
 
     # -- runtime data --------------------------------------------------------
-    def on_packet(self, packet: Packet) -> None:
-        self._signal_manager.on_packet(packet)
+    def on_packet(self, packet: Packet, t: Optional[float] = None) -> None:
+        if t is None:
+            t = packet.arrival_time
+        self._signal_manager.on_packet(packet, t)
         self.value_table.update_data(
             self._signal_manager.get_latest_data_values()
         )
         self.value_table.update_signal_values(
             self._signal_manager.get_latest_signal_outputs()
         )
+
+    def begin_new_session(self) -> None:
+        """Clear this panel's data for a new (global) acquisition session.
+
+        The global time origin itself is owned by the AcquisitionManager;
+        this only clears local buffers and raw readouts so every panel
+        restarts aligned at the session's t = 0.
+        """
+        self._signal_manager.reset_session()
+        self.plot_widget.clear()
+        self.value_table.update_data(
+            self._signal_manager.get_latest_data_values()
+        )
+        self.value_table.clear_signal_values()
+        self._last_paused_end = None
+        self._playback.resume()
 
     def _latest_sample_count(self) -> int:
         counts = []

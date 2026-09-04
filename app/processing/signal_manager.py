@@ -4,8 +4,14 @@ ring buffers ready for plotting / per-panel Name/Value readouts.
 One `SignalManager` exists per graph panel. This is the one place that
 knows how to go from a `Packet` to plottable signal data; the GUI never
 touches processors or raw packet fields directly - it only calls
-`SignalManager.on_packet()` and reads back `get_plot_data()` /
+`SignalManager.on_packet(packet, t)` and reads back `get_plot_data()` /
 `get_latest_signal_outputs()`.
+
+TIME IS GLOBAL: `on_packet` receives the timestamp `t` already assigned by
+the centralized `AcquisitionManager` (see acquisition/manager.py). This
+manager NEVER computes its own time origin, so every panel/signal shares
+the same acquisition timeline regardless of when the panel or signal was
+created. Clearing a panel's buffers does not reset the global time.
 
 Two kinds of rows are handled:
 
@@ -71,7 +77,6 @@ class SignalManager:
     def __init__(self) -> None:
         self._runtimes: Dict[str, _SignalRuntime] = {}
         self._latest_data_values: Dict[str, int] = {f: 0 for f in DATA_FIELDS}
-        self._t0: Optional[float] = None
 
     # -- configuration ---------------------------------------------------
     def set_signals(self, configs: List[SignalConfig]) -> None:
@@ -122,10 +127,18 @@ class SignalManager:
         return [rt.config for rt in self._runtimes.values()]
 
     # -- runtime -----------------------------------------------------------
-    def on_packet(self, packet: Packet) -> None:
-        if self._t0 is None:
-            self._t0 = packet.arrival_time
-        t = packet.arrival_time - self._t0
+    def on_packet(self, packet: Packet, t: Optional[float] = None) -> None:
+        """Process one packet on the acquisition timeline.
+
+        `t` is the GLOBAL timestamp already assigned by the centralized
+        AcquisitionManager (never computed here). It is always provided by
+        the GUI fan-out path. If omitted (low-level/test callers), the
+        packet's absolute arrival time is used - still a single consistent
+        reference, since every panel feeding from the same stream passes the
+        same value; the manager never re-zeros its own origin.
+        """
+        if t is None:
+            t = packet.arrival_time
 
         for field_name in DATA_FIELDS:
             if field_name in packet.values:
@@ -202,9 +215,9 @@ class SignalManager:
         return outputs
 
     def clear_all(self) -> None:
-        """Clears plotted history and resets processor/engine state for
-        every signal, and resets the shared time origin."""
-        self._t0 = None
+        """Clears this panel's plotted history and resets processor/engine
+        state for every signal. Does NOT touch the global acquisition time -
+        the next samples continue on the current global timeline."""
         for rt in self._runtimes.values():
             if rt.processor is not None:
                 rt.processor.reset()
@@ -212,3 +225,11 @@ class SignalManager:
                 rt.engine.reset()
             rt.time_buffer.clear()
             rt.value_buffer.clear()
+
+    def reset_session(self) -> None:
+        """Full per-panel reset for a new acquisition session: clears all
+        buffers/processors and zeroes the DATA1-8 raw readout. Global time
+        itself is owned by the AcquisitionManager."""
+        self.clear_all()
+        for key in self._latest_data_values:
+            self._latest_data_values[key] = 0

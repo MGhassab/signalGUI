@@ -30,6 +30,7 @@ from gui.panel_manager import PanelManagerWidget
 from gui.panel_window import PanelWindow
 from gui.serial_config_dialog import prompt_serial_config
 
+from acquisition.manager import AcquisitionManager
 from models.packet import Packet
 from models.app_config import AppConfig, PanelConfig
 from serial_io.packet_parser import PacketParser, PacketFormat
@@ -53,6 +54,9 @@ class MainWindow(QMainWindow):
 
         self._serial_port: str = ""
         self._baud_rate: int = 115200
+
+        # Centralized acquisition timeline (single source of truth for time).
+        self._acq = AcquisitionManager()
 
         # -- panel registry --------------------------------------------------
         self._panels: List[PanelWindow] = []
@@ -163,6 +167,12 @@ class MainWindow(QMainWindow):
         )
         self._panels.append(window)
         self._refresh_panel_ui()
+
+        # If acquisition already started, backfill the retained history so
+        # this panel immediately sits on the SAME global timeline.
+        if self._acq.has_history():
+            for history_t, history_packet in self._acq.iter_entries():
+                window.on_packet(history_packet, history_t)
 
         base = self.frameGeometry().topLeft()
         offset = (len(self._panels) - 1) % 8
@@ -288,6 +298,15 @@ class MainWindow(QMainWindow):
     def _on_connected(self) -> None:
         self._update_serial_actions()
         self._render_status_label(True)
+        # Every successful connect starts a NEW acquisition session: global
+        # time resets to 0 (anchored by the first received packet) and every
+        # panel's data is cleared so all panels restart aligned.
+        self._acq.begin()
+        for window in list(self._panels):
+            window.begin_new_session()
+        self.statusBar().showMessage(
+            "New acquisition session started (global time = 0).", 4000
+        )
 
     @Slot(str)
     def _on_disconnected(self, reason: str) -> None:
@@ -320,8 +339,11 @@ class MainWindow(QMainWindow):
     # -- packets + plotting ----------------------------------------------------
     @Slot(object)
     def _on_packet(self, packet: Packet) -> None:
+        # Assign ONE global timestamp BEFORE distributing to the panels so
+        # every panel/signal shares the exact same acquisition timeline.
+        t = self._acq.feed(packet)
         for window in list(self._panels):
-            window.on_packet(packet)
+            window.on_packet(packet, t)
 
     def _refresh_all_plots(self) -> None:
         for window in list(self._panels):

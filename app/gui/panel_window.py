@@ -21,7 +21,7 @@ Lifecycle:
 """
 from __future__ import annotations
 
-from typing import List
+from typing import List, Optional
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QMainWindow
@@ -69,8 +69,11 @@ class PanelWindow(QMainWindow):
         return self.panel.get_time_step()
 
     # -- runtime data --------------------------------------------------------
-    def on_packet(self, packet: Packet) -> None:
-        self.panel.on_packet(packet)
+    def on_packet(self, packet: Packet, t: Optional[float] = None) -> None:
+        self.panel.on_packet(packet, t)
+
+    def begin_new_session(self) -> None:
+        self.panel.begin_new_session()
 
     def refresh_plot(self) -> None:
         self.panel.refresh_plot()
