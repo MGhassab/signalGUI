@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from typing import List, Optional
 
+import numpy as np
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QTabWidget,
@@ -49,7 +50,7 @@ class GraphPanel(QWidget):
         self._sized = False
         self._dt = _DEFAULT_TIME_TICK
         self._playback = PlaybackController()
-        self._last_paused_end: int | None = None
+        self._last_paused_end: float | None = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -175,20 +176,20 @@ class GraphPanel(QWidget):
         return self._playback
 
     def _toggle_playback(self) -> None:
-        self._playback.toggle(self._latest_sample_count())
+        self._playback.toggle(self._latest_time())
         self._last_paused_end = None
         self._update_play_button()
 
     def _step_back(self) -> None:
         if not self._playback.is_paused():
-            self._playback.pause_at(self._latest_sample_count())
-        self._playback.back(self._latest_sample_count())
+            self._playback.pause_at(self._latest_time())
+        self._step_time(-1)
         self._last_paused_end = None
 
     def _step_forward(self) -> None:
         if not self._playback.is_paused():
-            self._playback.pause_at(self._latest_sample_count())
-        self._playback.forward(self._latest_sample_count())
+            self._playback.pause_at(self._latest_time())
+        self._step_time(+1)
         self._last_paused_end = None
 
     def _go_latest(self) -> None:
@@ -198,6 +199,57 @@ class GraphPanel(QWidget):
 
     def _update_play_button(self) -> None:
         self.play_btn.setText("\u25b6" if self._playback.is_paused() else "\u23f8")
+
+    # -- playback time helpers ------------------------------------------------
+    def _latest_time(self) -> Optional[float]:
+        """Latest sample time present on this panel (max over enabled
+        signals). Signals are fed from the same packet stream, so in steady
+        state this is the current global acquisition time."""
+        latest: Optional[float] = None
+        for cfg in self.signal_panel.get_configs():
+            if not cfg.enabled:
+                continue
+            t, _ = self._signal_manager.get_plot_data(cfg.name)
+            if t is not None and t.size:
+                cand = float(t[-1])
+                if latest is None or cand > latest:
+                    latest = cand
+        return latest
+
+    def _sample_times(self) -> np.ndarray:
+        """Sorted unique sample times present on this panel (the global time
+        axis). Signals enabled mid-session expose only their own later
+        window, so the union across signals is the panel's viewable timeline.
+        """
+        arrays = []
+        for cfg in self.signal_panel.get_configs():
+            if not cfg.enabled:
+                continue
+            t, _ = self._signal_manager.get_plot_data(cfg.name)
+            if t is not None and t.size:
+                arrays.append(t)
+        if not arrays:
+            return np.empty(0)
+        return np.unique(np.concatenate(arrays))
+
+    def _step_time(self, delta: int) -> None:
+        """Move the paused playhead by one real sample on the shared time
+        axis, snapped to the actual sample times present in the buffers."""
+        times = self._sample_times()
+        if times.size == 0:
+            return
+        earliest = float(times[0])
+        latest = float(times[-1])
+        cut = self._playback.cut_time()
+        if cut is None:
+            cut = latest
+        tol = 1e-9
+        if delta < 0:
+            before = times[times < cut - tol]
+            self._playback.seek(float(before[-1]) if before.size else earliest)
+        elif delta > 0:
+            after = times[times > cut + tol]
+            self._playback.seek(float(after[0]) if after.size else latest)
 
     # -- runtime data --------------------------------------------------------
     def on_packet(self, packet: Packet, t: Optional[float] = None) -> None:
@@ -227,26 +279,29 @@ class GraphPanel(QWidget):
         self._last_paused_end = None
         self._playback.resume()
 
-    def _latest_sample_count(self) -> int:
-        counts = []
-        for cfg in self.signal_panel.get_configs():
-            if not cfg.enabled:
-                continue
-            t, _ = self._signal_manager.get_plot_data(cfg.name)
-            if t is not None:
-                counts.append(int(t.size))
-        return min(counts) if counts else 0
-
     def refresh_plot(self) -> None:
-        count = self._latest_sample_count()
-        end = self._playback.display_end_index(count)
+        """Redraw every enabled signal aligned on the GLOBAL time axis.
 
+        Live: each signal draws its full buffer. A signal enabled later has
+        fewer samples and simply starts further right on the same axis - it
+        never truncates the older signals to its own shorter length.
+
+        Paused: every signal is sliced to the same wall-clock cut time, so
+        stepping backward/forward stays time-aligned even when signals have
+        different start times.
+        """
         if self._playback.is_paused():
-            if end == self._last_paused_end:
+            cut = self._playback.cut_time()
+            if cut is None:
+                cut = self._latest_time()
+            if cut is None:
+                return  # paused but nothing sampled yet
+            if cut == self._last_paused_end:
                 return  # view frozen; nothing new to draw for this panel
-            self._last_paused_end = end
+            self._last_paused_end = float(cut)
         else:
             self._last_paused_end = None
+            cut = None
 
         for cfg in self.signal_panel.get_configs():
             if not cfg.enabled:
@@ -254,9 +309,16 @@ class GraphPanel(QWidget):
             t, y = self._signal_manager.get_plot_data(cfg.name)
             if t is None or t.size == 0:
                 continue
-            if end < t.size:
-                t = t[:end]
-                y = y[:end]
+            if cut is not None:
+                idx = int(np.searchsorted(t, cut, side="right"))
+                if idx <= 0:
+                    # This signal had no samples at/before the cut (its
+                    # buffer starts later). Clear it so it does not keep
+                    # stale data from the previous frame on screen.
+                    self.plot_widget.clear_signal(cfg.name)
+                    continue
+                t = t[:idx]
+                y = y[:idx]
             if t.size:
                 self.plot_widget.update_signal_data(cfg.name, t, y)
 

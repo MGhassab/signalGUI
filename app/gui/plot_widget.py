@@ -144,6 +144,13 @@ class PlotWidget(pg.GraphicsLayoutWidget):
         self.scene().removeItem(axis.view_box)
         self.removeItem(axis.axis)
 
+    def clear_signal(self, name: str) -> None:
+        """Empty one signal's curve (e.g. when paused before that signal's
+        earliest sample so it must not keep stale data on screen)."""
+        axis = self._axes.get(name)
+        if axis is not None:
+            axis.curve.setData([], [])
+
     # -- manual interaction: release fixed tick overrides ---------------------
     def _on_signal_manual_range(self, name: str) -> None:
         """User wheel/pan on signal axis: keep the manual range but return
