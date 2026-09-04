@@ -50,7 +50,8 @@ app/
 │   ├── serial_config_dialog.py  # port/baud settings dialog (separate from graph UI)
 │   ├── live_value_table.py   # narrow Name/Value readout of the panel's signal outputs
 │   ├── signal_panel.py       # per-panel signal list table + add/edit/delete/enable
-│   ├── signal_dialog.py      # add/edit dialog, form adapts to signal type
+│   ├── signal_dialog.py      # add/edit dialog (Raw/Computational signals)
+│   ├── criteria_dialog.py    # criteria (derived metric) configuration dialog
 │   └── plot_widget.py        # one graph per panel, shared time axis, per-signal Y-axis
 ├── serial_io/
 │   ├── serial_manager.py  # QThread-based serial I/O, never blocks the GUI
@@ -59,12 +60,15 @@ app/
 │   ├── base_processor.py
 │   ├── raw_processor.py            # Data Type 1
 │   ├── computational_processor.py  # Data Type 2 (integral/derivative)
-│   ├── criteria_processor.py       # Data Type 3 (TODO algorithm)
+│   ├── criteria/                   # derived control-performance metrics
+│   │   ├── engine.py               # step detection + per-step metric computation
+│   │   ├── response.py             # StepResponse window model
+│   │   └── calculators/            # one class per criterion (registry)
 │   ├── ring_buffer.py              # bounded plot history
-│   └── signal_manager.py           # packet -> processors -> plot buffers
+│   └── signal_manager.py           # packet -> processors/criteria engines -> plot buffers
 ├── models/
 │   ├── packet.py          # the ONE place the 42-field layout is defined
-│   ├── signal_config.py   # the 3 signal-type dataclasses
+│   ├── signal_config.py   # the 3 signal-kind dataclasses (+ criteria params)
 │   └── app_config.py
 └── config/
     └── config_manager.py  # JSON save/load/reset
@@ -104,14 +108,24 @@ inside the app.
    `x_degree` reapplies the operation that many times. First-sample /
    zero-`dt` cases return `0.0` instead of NaN/crashing.
 
-5. **Criteria-Based signal (Type 3) has NO invented algorithm.** The
-   config (`ess_criteria_pct`, `delay_criteria_pct`), UI, and processor
-   class all exist and are wired end-to-end, but
-   `processing/criteria_processor.py::_evaluate_criteria()` is a
-   clearly-marked `TODO` that currently just passes the gain/offset'd
-   value straight through. Implement the real math there once it's
-   specified - everything else (dialog, table, save/load, plotting)
-   already works with this signal type.
+5. **Criteria signals are derived Source->Reference metrics.** A Criteria
+   row compares one SOURCE (a configured signal or a raw channel) against
+   a POSITION-4 reference channel (`position41..position44`, the only valid
+   references) and reports one metric: steady-state error, settling time,
+   rise/fall time, overshoot, or inverse response. On each reference step
+   the engine (`processing/criteria/engine.py`) captures the response and
+   computes the metric via a per-criterion calculator; the result is held
+   between steps and plotted as a dashed derived series. Steady-state error
+   is reported continuously as e(t) = reference - source. A criteria row
+   only sees steps that occur after it is enabled.
+
+6. **Criteria metrics update per reference step.** Settling/rise/fall
+   times are measured from the start of each detected reference step. Step
+   detection uses a configurable threshold (`step_threshold`, 0 = auto)
+   plus plateau confirmation; the analysis window ends once the source has
+   observably settled or the horizon (5 s) elapses. Add a new criterion by
+   writing a `CriterionCalculator` subclass and registering it in
+   `processing/criteria/calculators/__init__.py`.
 
 ## Testing without real hardware
 
@@ -129,5 +143,5 @@ into one end while the app reads the other.
   `ComputationalProcessor` and register it in `_OPERATIONS`.
 - **Real packet framing**: implement a `FrameExtractor` subclass in
   `serial_io/packet_parser.py`.
-- **Criteria algorithm**: implement `_evaluate_criteria` in
-  `processing/criteria_processor.py`.
+- **New criterion**: write a `CriterionCalculator` subclass and register
+  it in `processing/criteria/calculators/__init__.py`.

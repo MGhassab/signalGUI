@@ -1,9 +1,13 @@
-"""Add/Edit dialog for a single signal configuration.
+"""Add/Edit dialog for one Raw or Computational signal configuration.
 
 The form adapts to the selected signal type via a QStackedWidget: common
 fields (name, source, gain, offset, y-range, dY, dT) are always shown;
-type-specific fields (operation/x-degree, or ESS/Delay criteria) appear
-on a second, type-dependent panel below.
+type-specific fields (operation/x-degree) appear on a second, type-
+dependent panel below.
+
+Criteria signals are NOT edited here - they use `CriteriaSignalDialog`
+(see gui/criteria_dialog.py) because they need a source/reference pair,
+a criterion, and dynamic per-criterion parameters.
 """
 from __future__ import annotations
 
@@ -18,7 +22,7 @@ from PySide6.QtWidgets import (
 from models.packet import PACKET_FIELDS
 from models.signal_config import (
     SignalConfig, SignalType, Operation,
-    RawSignalConfig, ComputationalSignalConfig, CriteriaSignalConfig,
+    RawSignalConfig, ComputationalSignalConfig,
 )
 
 
@@ -52,7 +56,6 @@ class SignalDialog(QDialog):
         self.type_combo = QComboBox()
         self.type_combo.addItem("Raw Data", SignalType.RAW)
         self.type_combo.addItem("Computational Data", SignalType.COMPUTATIONAL)
-        self.type_combo.addItem("Criteria-Based Data", SignalType.CRITERIA)
         common_form.addRow("Type:", self.type_combo)
 
         self.source_combo = QComboBox()
@@ -96,14 +99,6 @@ class SignalDialog(QDialog):
         comp_form.addRow("X degree:", self.x_degree_spin)
         self.stack.addWidget(self._comp_page)
 
-        self._criteria_page = QWidget()
-        crit_form = QFormLayout(self._criteria_page)
-        self.ess_spin = _double_spin(minimum=0.0, maximum=100.0, decimals=3, value=2.0)
-        crit_form.addRow("ESS Criteria (%):", self.ess_spin)
-        self.delay_spin = _double_spin(minimum=0.0, maximum=100.0, decimals=3, value=5.0)
-        crit_form.addRow("Delay Criteria (%):", self.delay_spin)
-        self.stack.addWidget(self._criteria_page)
-
         outer.addWidget(self.stack)
 
         self.type_combo.currentIndexChanged.connect(self._on_type_changed)
@@ -125,7 +120,6 @@ class SignalDialog(QDialog):
         page = {
             SignalType.RAW: self._raw_page,
             SignalType.COMPUTATIONAL: self._comp_page,
-            SignalType.CRITERIA: self._criteria_page,
         }[stype]
         self.stack.setCurrentWidget(page)
 
@@ -148,9 +142,6 @@ class SignalDialog(QDialog):
             op_idx = self.operation_combo.findData(Operation(cfg.operation))
             self.operation_combo.setCurrentIndex(op_idx)
             self.x_degree_spin.setValue(cfg.x_degree)
-        elif isinstance(cfg, CriteriaSignalConfig):
-            self.ess_spin.setValue(cfg.ess_criteria_pct)
-            self.delay_spin.setValue(cfg.delay_criteria_pct)
 
         self._on_type_changed(idx)
 
@@ -178,17 +169,11 @@ class SignalDialog(QDialog):
         stype = self.type_combo.currentData()
         if stype == SignalType.RAW:
             self._result_config = RawSignalConfig(**common)
-        elif stype == SignalType.COMPUTATIONAL:
+        else:
             self._result_config = ComputationalSignalConfig(
                 **common,
                 operation=self.operation_combo.currentData(),
                 x_degree=self.x_degree_spin.value(),
-            )
-        else:
-            self._result_config = CriteriaSignalConfig(
-                **common,
-                ess_criteria_pct=self.ess_spin.value(),
-                delay_criteria_pct=self.delay_spin.value(),
             )
         self.accept()
 

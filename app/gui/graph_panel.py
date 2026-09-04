@@ -32,7 +32,7 @@ from PySide6.QtWidgets import (
 )
 
 from models.packet import Packet
-from models.signal_config import SignalConfig
+from models.signal_config import SignalConfig, SignalType
 from processing.signal_manager import SignalManager
 from gui.live_value_table import LiveValueTable
 from gui.plot_widget import PlotWidget
@@ -96,7 +96,10 @@ class GraphPanel(QWidget):
         enabled = [c for c in self.signal_panel.get_configs() if c.enabled]
         enabled_names = {c.name for c in enabled}
         for cfg in enabled:
-            self.plot_widget.add_or_update_signal(cfg.name, cfg.y_min, cfg.y_max)
+            derived = SignalType(cfg.signal_type) == SignalType.CRITERIA
+            self.plot_widget.add_or_update_signal(
+                cfg.name, cfg.y_min, cfg.y_max, derived=derived
+            )
         for existing in self.plot_widget.signal_names():
             if existing not in enabled_names:
                 self.plot_widget.remove_signal(existing)

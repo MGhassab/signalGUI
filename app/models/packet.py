@@ -38,7 +38,12 @@ PACKET_SIZE_BYTES = len(PACKET_FIELDS) * BYTES_PER_FIELD  # 84 bytes
 
 DATA_FIELDS: List[str] = [f"Data{i}" for i in range(1, 9)]
 
+# The Position-4 group: the only channels that may be used as a criteria
+# signal's REFERENCE (see models/signal_config.py).
+POSITION4_FIELDS: List[str] = [f"position4{i}" for i in range(1, 5)]
+
 assert len(PACKET_FIELDS) == 42, "Packet layout must have exactly 42 fields"
+assert all(f in PACKET_FIELDS for f in POSITION4_FIELDS)
 
 
 @dataclass

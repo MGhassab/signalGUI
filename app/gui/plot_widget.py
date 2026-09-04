@@ -27,6 +27,8 @@ from typing import Dict, List
 import numpy as np
 import pyqtgraph as pg
 
+from PySide6.QtCore import Qt
+
 _AXIS_COLORS = [
     "#1f77b4", "#d62728", "#2ca02c", "#9467bd",
     "#ff7f0e", "#17becf", "#e377c2", "#8c564b",
@@ -34,14 +36,21 @@ _AXIS_COLORS = [
 
 
 class _SignalAxis:
-    """One signal's independent Y ViewBox + AxisItem + curve."""
+    """One signal's independent Y ViewBox + AxisItem + curve.
 
-    def __init__(self, color: str):
+    Derived (criteria) signals are drawn dashed so raw/input signals and
+    computed metrics are visually distinct in the same graph.
+    """
+
+    def __init__(self, color: str, derived: bool = False):
         self.view_box = pg.ViewBox()
         self.axis = pg.AxisItem("right")
         self.axis.setPen(color)
         self.axis.setTextPen(color)
-        self.curve = pg.PlotCurveItem(pen=pg.mkPen(color, width=1.5))
+        style = Qt.DashLine if derived else Qt.SolidLine
+        self.curve = pg.PlotCurveItem(
+            pen=pg.mkPen(color, width=1.5, style=style)
+        )
         self.view_box.addItem(self.curve)
 
 
@@ -64,7 +73,8 @@ class PlotWidget(pg.GraphicsLayoutWidget):
     def signal_names(self) -> List[str]:
         return list(self._axes.keys())
 
-    def add_or_update_signal(self, name: str, y_min: float, y_max: float) -> None:
+    def add_or_update_signal(self, name: str, y_min: float, y_max: float,
+                             derived: bool = False) -> None:
         if name in self._axes:
             self._axes[name].view_box.setYRange(y_min, y_max, padding=0)
             return
@@ -72,7 +82,7 @@ class PlotWidget(pg.GraphicsLayoutWidget):
         color = _AXIS_COLORS[self._next_color_idx % len(_AXIS_COLORS)]
         self._next_color_idx += 1
 
-        axis = _SignalAxis(color)
+        axis = _SignalAxis(color, derived=derived)
         self._axes[name] = axis
 
         axis.view_box.setYRange(y_min, y_max, padding=0)
