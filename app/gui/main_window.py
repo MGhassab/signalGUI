@@ -1,7 +1,7 @@
 """Main application window: application controller / panel manager.
 
-The main window is NOT a graph panel. It shows the panel manager list and
-owns the app-level chrome (menus, toolbar, serial status). Graph panels
+The main window is split into two panes: the left side is the panel
+(window) manager, the right side the serial settings pane. Graph panels
 live in independent child tool windows (`PanelWindow`) registered here.
 
 Responsibilities:
@@ -23,10 +23,11 @@ from typing import List, Optional
 from PySide6.QtCore import Qt, QEvent, QPoint, QTimer, Slot
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QInputDialog, QMessageBox,
-    QFileDialog, QStatusBar, QLabel,
+    QFileDialog, QStatusBar, QLabel, QSplitter,
 )
 
 from gui.panel_manager import PanelManagerWidget
+from gui.serial_settings_widget import SerialSettingsWidget
 from gui.panel_window import PanelWindow
 from gui.serial_config_dialog import prompt_serial_config
 
@@ -81,8 +82,19 @@ class MainWindow(QMainWindow):
 
     # -- UI construction ----------------------------------------------------
     def _build_ui(self) -> None:
+        # Main window split: left = window management, right = serial settings.
         self.panel_manager = PanelManagerWidget()
-        self.setCentralWidget(self.panel_manager)
+        self.serial_widget = SerialSettingsWidget(
+            port=self._serial_port, baud=self._baud_rate
+        )
+
+        self.splitter = QSplitter(Qt.Horizontal, self)
+        self.splitter.addWidget(self.panel_manager)
+        self.splitter.addWidget(self.serial_widget)
+        self.splitter.setStretchFactor(0, 2)
+        self.splitter.setStretchFactor(1, 1)
+        self.splitter.setSizes([420, 340])
+        self.setCentralWidget(self.splitter)
 
         status_bar = QStatusBar()
         self.setStatusBar(status_bar)
@@ -117,15 +129,15 @@ class MainWindow(QMainWindow):
         self._delete_action.triggered.connect(self._delete_active_panel)
         self._refresh_panel_ui()
 
-        # Toolbar: reuse the same "New Panel" action.
-        self.addToolBar("Main").addAction(self._new_panel_action)
+        # Note: the old "New Panel" toolbar (a top bar holding only that one
+        # action) was removed - panel management lives in the left pane now.
 
         # -- Settings ---------------------------------------------------------
         settings_menu = menu_bar.addMenu("&Settings")
         settings_menu.addAction("Serial Configuration...", self._on_serial_config)
         settings_menu.addSeparator()
         self._connect_action = settings_menu.addAction("&Connect")
-        self._connect_action.triggered.connect(self._on_connect)
+        self._connect_action.triggered.connect(lambda: self._on_connect())
         self._disconnect_action = settings_menu.addAction("&Disconnect")
         self._disconnect_action.triggered.connect(self._serial.disconnect)
 
@@ -138,6 +150,9 @@ class MainWindow(QMainWindow):
         self._serial.disconnected.connect(self._on_disconnected)
         self._serial.errorOccurred.connect(self._on_serial_error)
         self._serial.packetReceived.connect(self._on_packet)
+
+        self.serial_widget.connectRequested.connect(self._on_connect)
+        self.serial_widget.disconnectRequested.connect(self._serial.disconnect)
 
         self.panel_manager.newRequested.connect(lambda: self.new_panel())
         self.panel_manager.showRequested.connect(self._manager_show)
@@ -281,22 +296,31 @@ class MainWindow(QMainWindow):
         if result is None:
             return
         self._serial_port, self._baud_rate = result
+        self.serial_widget.set_settings(self._serial_port, self._baud_rate)
         self._render_status_label(self._serial.is_connected)
         self.statusBar().showMessage(
             "Serial settings saved - they apply on the next connect.", 4000
         )
 
-    def _on_connect(self) -> None:
-        if not self._serial_port:
-            self._on_serial_config()
-            if not self._serial_port:
-                return
-        self._serial.connect_to(self._serial_port, self._baud_rate)
+    def _on_connect(self, port: str = "", baud: int = 0) -> None:
+        if not port:
+            live = self.serial_widget.current_settings()
+            if live is None:
+                return  # empty/invalid input (widget already warned)
+            port, baud = live
+        if not port:
+            return
+        self._serial_port = port
+        self._baud_rate = baud
+        self._serial.connect_to(port, baud)
 
     @Slot()
     def _on_connected(self) -> None:
         self._update_serial_actions()
         self._render_status_label(True)
+        self.serial_widget.set_connected(
+            True, self._serial_port, self._baud_rate
+        )
         # Every successful connect starts a NEW acquisition session: global
         # time resets to 0 (anchored by the first received packet) and every
         # panel's data is cleared so all panels restart aligned.
@@ -311,7 +335,11 @@ class MainWindow(QMainWindow):
     def _on_disconnected(self, reason: str) -> None:
         self._update_serial_actions()
         self._render_status_label(False)
+        self.serial_widget.set_connected(
+            False, self._serial_port, self._baud_rate
+        )
         if reason:
+            self.serial_widget.set_message(reason, ok=False)
             self.statusBar().showMessage(f"Disconnected: {reason}", 5000)
 
     @Slot(str)
@@ -367,6 +395,7 @@ class MainWindow(QMainWindow):
     def _apply_app_config(self, config: AppConfig) -> None:
         self._serial_port = config.serial_port
         self._baud_rate = int(config.baud_rate or 115200)
+        self.serial_widget.set_settings(self._serial_port, self._baud_rate)
         self._render_status_label(self._serial.is_connected)
         for window in list(self._panels):
             window.destroy_panel()

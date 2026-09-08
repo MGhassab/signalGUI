@@ -98,7 +98,12 @@ class LiveValueTable(QTableWidget):
         total = len(self._signal_names)
         if self._data_visible:
             total += len(DATA_FIELDS)
-        self.setRowCount(max(1, total))
+        # Drop stale items first: QTableWidget.setRowCount keeps existing
+        # items in whatever rows are retained, so shrinking the table without
+        # clearing would leave a phantom row (e.g. a leftover "DATA1") after
+        # the OD_DATA section is hidden with no signal rows to overwrite it.
+        self.clearContents()
+        self.setRowCount(total)
 
         offset = 0
         if self._data_visible:
