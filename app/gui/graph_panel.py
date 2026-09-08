@@ -10,25 +10,27 @@ panels never share mutable state:
 
 The widget is a tabbed view with a slim control row on top:
 
-    [ ▶/⏸ ] [ ◀ ] [ ▶ ] [ ⏮ Latest ]        dT (s): [____]
+    [ ▶/⏸ ] [ ◀ ] [ ▶ ] [ ⏮ Latest ]  dT (s): [____] [Show Raw Data] [⟲]
 
     [Plot] [Signal Configuration]
 
 Play/Pause only affects THIS panel's DISPLAY. Data acquisition (packet
 ingestion into the buffers) always continues, so a paused panel keeps its
 full history and the user can step backward/forward through it or jump
-back to live. The left Name/Value table shows DATA1-8 (raw, display-only)
-followed by the panel's enabled signal outputs.
+back to live. The left Name/Value table shows the OD_DATA rows (raw,
+display-only, hideable via "Show Raw Data") followed by the panel's enabled
+signal outputs. The ⟲ button resets the plot panel (clear + axes + show
+all plots + resume live).
 """
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import List, Optional, Set
 
 import numpy as np
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QTabWidget,
-    QToolButton, QLabel, QDoubleSpinBox,
+    QToolButton, QLabel, QDoubleSpinBox, QCheckBox,
 )
 
 from models.packet import Packet
@@ -51,6 +53,7 @@ class GraphPanel(QWidget):
         self._dt = _DEFAULT_TIME_TICK
         self._playback = PlaybackController()
         self._last_paused_end: float | None = None
+        self._plot_hidden: Set[str] = set()
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -96,6 +99,24 @@ class GraphPanel(QWidget):
         )
         self.dt_spin.valueChanged.connect(self._on_dt_changed)
         controls.addWidget(self.dt_spin)
+        controls.addSpacing(12)
+
+        self.show_data_check = QCheckBox("Show Raw Data", self)
+        self.show_data_check.setChecked(True)
+        self.show_data_check.setToolTip(
+            "Show/hide the fixed OD_DATA rows in the left readout"
+        )
+        self.show_data_check.toggled.connect(self._on_show_data_toggled)
+        controls.addWidget(self.show_data_check)
+
+        self.reset_plot_btn = QToolButton(self)
+        self.reset_plot_btn.setText("\u21ba")  # ⟲
+        self.reset_plot_btn.setToolTip(
+            "Reset plot panel: clear data, restore axes, show all plots"
+        )
+        self.reset_plot_btn.clicked.connect(self.reset_plot)
+        controls.addWidget(self.reset_plot_btn)
+
         controls.addStretch(1)
 
         root.addLayout(controls)
@@ -127,6 +148,8 @@ class GraphPanel(QWidget):
         # -- internal wiring: this panel's config -> this panel's data -------
         self.signal_panel.signalsChanged.connect(self._on_signals_changed)
         self.signal_panel.signalEnabledChanged.connect(self._on_signals_changed)
+        self.signal_panel.plotVisibilityChanged.connect(self._on_plot_visibility)
+        self.signal_panel.plotVisibilityReset.connect(self._on_plot_visibility_reset)
 
         self.plot_widget.set_time_tick_step(self._dt)
 
@@ -153,6 +176,8 @@ class GraphPanel(QWidget):
     def _on_signals_changed(self) -> None:
         configs = self.signal_panel.get_configs()
         self._signal_manager.set_signals(configs)
+        valid = {c.name for c in configs}
+        self._plot_hidden &= valid
         self._resync_plot_axes()
         self.value_table.set_signal_names([c.name for c in configs if c.enabled])
 
@@ -170,6 +195,26 @@ class GraphPanel(QWidget):
         for existing in self.plot_widget.signal_names():
             if existing not in enabled_names:
                 self.plot_widget.remove_signal(existing)
+
+    def _on_show_data_toggled(self, visible: bool) -> None:
+        """Show/hide the fixed OD_DATA rows. Does not affect the plot or
+        the underlying data, only their presentation in the left column."""
+        self.value_table.set_data_visible(visible)
+
+    def _on_plot_visibility(self, name: str, visible: bool) -> None:
+        """Independent plot visibility: hides/unhides a signal's plot curve
+        without affecting its numeric display or processing. The signal's
+        data is still maintained; only the curve is shown/hidden."""
+        if visible:
+            self._plot_hidden.discard(name)
+        else:
+            self._plot_hidden.add(name)
+        # Refresh so the curve appears/disappears immediately.
+        self.refresh_plot()
+
+    def _on_plot_visibility_reset(self) -> None:
+        self._plot_hidden.clear()
+        self._resync_plot_axes()
 
     # -- playback -------------------------------------------------------------
     def playback(self) -> PlaybackController:
@@ -271,7 +316,7 @@ class GraphPanel(QWidget):
         restarts aligned at the session's t = 0.
         """
         self._signal_manager.reset_session()
-        self.plot_widget.clear()
+        self.plot_widget.clear_curves()
         self.value_table.update_data(
             self._signal_manager.get_latest_data_values()
         )
@@ -306,6 +351,11 @@ class GraphPanel(QWidget):
         for cfg in self.signal_panel.get_configs():
             if not cfg.enabled:
                 continue
+            if cfg.name in self._plot_hidden:
+                # Plot is hidden: keep the curve empty but do not short-circuit
+                # numeric updates (those happen in on_packet, independently).
+                self.plot_widget.clear_signal(cfg.name)
+                continue
             t, y = self._signal_manager.get_plot_data(cfg.name)
             if t is None or t.size == 0:
                 continue
@@ -324,8 +374,33 @@ class GraphPanel(QWidget):
 
     def clear(self) -> None:
         self._signal_manager.clear_all()
-        self.plot_widget.clear()
+        self.plot_widget.clear_curves()
         self.value_table.clear_signal_values()
+
+    def reset_plot(self) -> None:
+        """Reset the plot panel to its default state.
+
+        Restores: cleared data/history, default axis ranges (configured
+        y_min/y_max), all signals' plots visible, live (un-paused) playback.
+        Does NOT touch unrelated application state (signal configuration,
+        serial, other panels).
+        """
+        # Clear data/history (both buffers and on-screen curves).
+        self._signal_manager.clear_all()
+        self.plot_widget.clear_curves()
+
+        # Restore playback to live / latest.
+        self._playback.resume()
+        self._last_paused_end = None
+        self._update_play_button()
+
+        # Restore all plots to visible.
+        self.signal_panel.reset_plot_visibility()
+        self._plot_hidden.clear()
+
+        # Reset axis ranges/ticks to the configured defaults.
+        self._resync_plot_axes()
+        self.plot_widget.reset_axes()
 
     def showEvent(self, event) -> None:
         super().showEvent(event)

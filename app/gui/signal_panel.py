@@ -8,7 +8,7 @@ ordered, per-panel configuration list.
 """
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
@@ -23,7 +23,7 @@ from models.signal_config import (
 from gui.signal_dialog import SignalDialog
 from gui.criteria_dialog import CriteriaSignalDialog, CRITERION_LABELS
 
-COLUMNS = ["Enable", "Name", "Type", "Source", "Gain", "Offset",
+COLUMNS = ["Enable", "Plot", "Name", "Type", "Source", "Gain", "Offset",
            "Y-Min", "Y-Max", "dY", "Details"]
 
 _TYPE_LABELS = {
@@ -38,10 +38,13 @@ _PARAM_BLANK = "\u2014"
 class SignalPanel(QWidget):
     signalsChanged = Signal()                     # any add/edit/delete
     signalEnabledChanged = Signal(str, bool)       # name, enabled
+    plotVisibilityChanged = Signal(str, bool)      # name, plot_visible
+    plotVisibilityReset = Signal()                 # all plots reset to visible
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._configs: List[SignalConfig] = []
+        self._plot_visible: Dict[str, bool] = {}
 
         layout = QVBoxLayout(self)
         btn_row = QHBoxLayout()
@@ -73,7 +76,19 @@ class SignalPanel(QWidget):
 
     def set_configs(self, configs: List[SignalConfig]) -> None:
         self._configs = list(configs)
+        # Drop plot-visibility state for signals that no longer exist.
+        valid = {c.name for c in self._configs}
+        self._plot_visible = {
+            k: v for k, v in self._plot_visible.items() if k in valid
+        }
         self._refresh_table()
+
+    def reset_plot_visibility(self) -> None:
+        """Mark every current signal's plot as visible (used by plot reset)."""
+        for cfg in self._configs:
+            self._plot_visible[cfg.name] = True
+        self._refresh_table()
+        self.plotVisibilityReset.emit()
 
     def get_configs(self) -> List[SignalConfig]:
         return list(self._configs)
@@ -99,12 +114,19 @@ class SignalPanel(QWidget):
             )
             self.table.setCellWidget(row, 0, chk)
 
+            plot_chk = QCheckBox()
+            plot_chk.setChecked(self._plot_visible.get(cfg.name, True))
+            plot_chk.stateChanged.connect(
+                lambda state, name=cfg.name: self._on_plot_toggled(name, state)
+            )
+            self.table.setCellWidget(row, 1, plot_chk)
+
             is_criteria = self._is_criteria(cfg)
             if is_criteria:
                 cells = self._criteria_cells(cfg)
             else:
                 cells = self._signal_cells(cfg)
-            for col, val in enumerate(cells, start=1):
+            for col, val in enumerate(cells, start=2):
                 item = QTableWidgetItem(str(val))
                 item.setFlags(item.flags() & ~Qt.ItemIsEditable)
                 if val == _PARAM_BLANK:
@@ -150,6 +172,16 @@ class SignalPanel(QWidget):
         ]
 
     # -- interactions --------------------------------------------------------
+    def plot_visible(self, name: str) -> bool:
+        """Whether a signal's plot curve is currently shown."""
+        return self._plot_visible.get(name, True)
+
+    def _on_plot_toggled(self, name: str, state: int) -> None:
+        """Independent plot visibility toggle — does NOT affect the signal's
+        numeric display or processing (that is controlled by 'Enable')."""
+        self._plot_visible[name] = bool(state)
+        self.plotVisibilityChanged.emit(name, bool(state))
+
     def _on_enable_toggled(self, name: str, state: int) -> None:
         for cfg in self._configs:
             if cfg.name == name:

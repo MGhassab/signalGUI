@@ -83,6 +83,7 @@ class PlotWidget(pg.GraphicsLayoutWidget):
         self._applied: Dict[str, Tuple[float, float, float, bool]] = {}
         self._next_color_idx = 0
         self._window_seconds: float = 30.0  # auto-scrolling time window
+        self._time_tick_step: float = 0.0  # configured X major tick step
 
         self._plot_item.vb.sigResized.connect(self._sync_views)
         self._plot_item.vb.sigRangeChangedManually.connect(
@@ -144,6 +145,51 @@ class PlotWidget(pg.GraphicsLayoutWidget):
         self.scene().removeItem(axis.view_box)
         self.removeItem(axis.axis)
 
+    def reset_axes(self) -> None:
+        """Force every signal axis back to its configured y_min/y_max and
+        restore the fixed dY tick override. This deliberately overrides any
+        manual zoom/pan the user applied, which is what a plot reset needs.
+        Also restores the configured time (X) tick step and re-scrolls the
+        window to the latest sample."""
+        for name, cfg in list(self._applied.items()):
+            axis = self._axes.get(name)
+            if axis is None:
+                continue
+            y_min, y_max, dy, _derived = cfg
+            axis.view_box.setYRange(float(y_min), float(y_max), padding=0)
+            self._apply_y_tick_override(name, dy)
+        self._reapply_time_ticks()
+        # Re-scroll the time window to the latest sample if any data exists.
+        # Guard the degenerate case (no data => X window is empty): calling
+        # setXRange with min==max collapses the view to zero width and turns
+        # the plot blank/white, and it may not recover on the next update.
+        latest: float = 0.0
+        has_any: bool = False
+        for axis in self._axes.values():
+            t, _y = axis.curve.getData()
+            if t is not None and len(t):
+                has_any = True
+                cand = float(t[-1])
+                if cand > latest:
+                    latest = cand
+        if has_any:
+            # Match the live-update path exactly: a plain setXRange window.
+            self._plot_item.setXRange(
+                max(0.0, latest - self._window_seconds), latest, padding=0
+            )
+        else:
+            # Empty plot after a reset: keep a sane default window instead of
+            # collapsing to a zero-width [0,0] view (which renders blank).
+            self._plot_item.setXRange(0.0, self._window_seconds, padding=0)
+
+    def _reapply_time_ticks(self) -> None:
+        """Re-apply the panel's configured time-tick step if one is stored,
+        else leave the axis on adaptive ticks."""
+        if self._time_tick_step and self._time_tick_step > 0:
+            self._plot_item.getAxis("bottom").setTickSpacing(
+                levels=[(float(self._time_tick_step), 0.0)]
+            )
+
     def clear_signal(self, name: str) -> None:
         """Empty one signal's curve (e.g. when paused before that signal's
         earliest sample so it must not keep stale data on screen)."""
@@ -182,6 +228,7 @@ class PlotWidget(pg.GraphicsLayoutWidget):
         Only called when the panel's dT configuration is explicitly applied.
         A manual X interaction releases it back to adaptive ticks.
         """
+        self._time_tick_step = float(dt)
         bottom = self._plot_item.getAxis("bottom")
         if dt and dt > 0:
             bottom.setTickSpacing(levels=[(float(dt), 0.0)])
@@ -199,7 +246,15 @@ class PlotWidget(pg.GraphicsLayoutWidget):
             max(0.0, t_max - self._window_seconds), t_max, padding=0
         )
 
-    def clear(self) -> None:
+    def clear_curves(self) -> None:
+        # IMPORTANT: this must NOT be named ``clear``. pyqtgraph's
+        # GraphicsLayoutWidget.__init__ does
+        #   setattr(self, "clear", getattr(self.ci, "clear"))
+        # which installs an instance attribute that shadows any class method
+        # named ``clear``. Calling self.plot_widget.clear() would therefore
+        # invoke GraphicsLayout.clear(), which *removes every graphics item
+        # from the plot layout* - leaving a blank/white plot. Hence the
+        # distinct name.
         for axis in self._axes.values():
             axis.curve.setData([], [])
 

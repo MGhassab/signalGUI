@@ -33,7 +33,7 @@ from gui.serial_config_dialog import prompt_serial_config
 from acquisition.manager import AcquisitionManager
 from models.packet import Packet
 from models.app_config import AppConfig, PanelConfig
-from serial_io.packet_parser import PacketParser, PacketFormat
+from serial_io.packet_parser import PacketParser
 from serial_io.serial_manager import SerialManager
 from config.config_manager import ConfigManager
 
@@ -46,10 +46,9 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Embedded Device Monitor")
         self.resize(1000, 700)
 
-        # Protocol interpretation is centralized here - change byte_order /
-        # signed in one place if the wire format changes.
-        self._packet_format = PacketFormat(byte_order="little", signed=False)
-        self._parser = PacketParser(fmt=self._packet_format)
+        # Protocol interpretation is centralized in the packet decoder
+        # (per-field signedness + scaling) — change it in models/packet.py.
+        self._parser = PacketParser()
         self._serial = SerialManager(self._parser)
 
         self._serial_port: str = ""

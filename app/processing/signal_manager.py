@@ -76,7 +76,7 @@ class SignalManager:
 
     def __init__(self) -> None:
         self._runtimes: Dict[str, _SignalRuntime] = {}
-        self._latest_data_values: Dict[str, int] = {f: 0 for f in DATA_FIELDS}
+        self._latest_data_values: Dict[str, float] = {f: 0.0 for f in DATA_FIELDS}
 
     # -- configuration ---------------------------------------------------
     def set_signals(self, configs: List[SignalConfig]) -> None:
@@ -203,7 +203,7 @@ class SignalManager:
             return None, None
         return rt.time_buffer.as_array(), rt.value_buffer.as_array()
 
-    def get_latest_data_values(self) -> Dict[str, int]:
+    def get_latest_data_values(self) -> Dict[str, float]:
         return dict(self._latest_data_values)
 
     def get_latest_signal_outputs(self) -> Dict[str, float]:
@@ -236,4 +236,4 @@ class SignalManager:
         itself is owned by the AcquisitionManager."""
         self.clear_all()
         for key in self._latest_data_values:
-            self._latest_data_values[key] = 0
+            self._latest_data_values[key] = 0.0

@@ -2,143 +2,159 @@
 
 Two concerns are deliberately kept separate:
 
-1. Framing - deciding where one packet ends and the next begins inside a
-   continuous byte stream that may deliver partial packets, multiple
-   packets per read, or garbage bytes. See `FrameExtractor`.
-2. Decoding - turning 84 bytes into 42 named integer values, according to
-   configurable endianness/signedness. See `PacketDecoder`.
+1. Framing — deciding where one packet ends and the next begins inside a
+   continuous byte stream.  See `SyncFrameExtractor`.
+2. Decoding — turning 84 bytes into 42 named float values, with per-field
+   signedness and protocol scaling.  See `PacketDecoder`.
 
-No packet header, footer, sync word or checksum has been specified for
-this protocol yet. Until that's specified, `NullFrameExtractor` assumes
-the stream is a back-to-back sequence of fixed-size 84-byte packets with
-NO framing markers at all - it just slices the buffer into
-PACKET_SIZE_BYTES chunks as they become available. This is intentionally
-the simplest possible strategy, so it is obviously a placeholder and not
-a guess at a real protocol.
-
-When the real framing protocol is defined (e.g. a sync word and/or a
-trailing checksum), implement a new `FrameExtractor` subclass and pass it
-into `PacketParser(frame_extractor=...)` - nothing else in the app needs
-to change.
+Wire format (90 bytes per frame):
+  Header (3 bytes): 0xAA 0x55 0xA5
+  Data   (84 bytes): 42 × 16-bit LE fields
+  Footer (3 bytes): 0x5A 0xAA 0x55
 """
 from __future__ import annotations
 
 import struct
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
-from typing import Dict, List, Literal, Optional
+from typing import Dict, List, Optional
 
-from models.packet import Packet, PACKET_FIELDS, PACKET_SIZE_BYTES
+from models.packet import (
+    Packet, PACKET_FIELDS, PACKET_SIZE_BYTES, FIELD_SIGNED, FIELD_SCALE,
+)
 
-ByteOrder = Literal["little", "big"]
+BYTES_PER_FIELD = 2
 
+# -- Frame extractor (framing / sync) -----------------------------------------
 
-@dataclass
-class PacketFormat:
-    """Centralized, editable interpretation settings for the wire format.
-
-    Change these here - nothing else in the app hard-codes endianness or
-    signedness. Currently applies uniformly to all 42 fields; if a future
-    protocol needs per-field overrides, extend this class rather than
-    scattering struct format strings elsewhere.
-    """
-    byte_order: ByteOrder = "little"
-    signed: bool = False
-
-    @property
-    def struct_prefix(self) -> str:
-        return "<" if self.byte_order == "little" else ">"
-
-    @property
-    def struct_code(self) -> str:
-        return "h" if self.signed else "H"
+SYNC_HEADER = bytes([0xAA, 0x55, 0xA5])
+SYNC_FOOTER = bytes([0x5A, 0xAA, 0x55])
+HEADER_SIZE = 3
+FOOTER_SIZE = 3
+FRAME_TOTAL_SIZE = HEADER_SIZE + PACKET_SIZE_BYTES + FOOTER_SIZE  # 90
 
 
 class FrameExtractor(ABC):
     """Strategy for slicing a raw byte stream into individual packet
-    frames. Isolated so the real framing protocol (sync bytes / checksum /
-    length field) can be dropped in later without touching decoding or
-    the rest of the app.
+    frames.  Isolated so the framing protocol can be changed without
+    touching decoding or the rest of the app.
     """
 
     @abstractmethod
     def feed(self, data: bytes) -> List[bytes]:
-        """Feed newly-received bytes in. Returns zero or more complete
-        frames (each exactly PACKET_SIZE_BYTES long). Any leftover/partial
-        bytes are buffered internally for the next call - callers must
-        handle partial packets and multiple packets per read correctly,
-        which this buffering guarantees.
+        """Feed newly-received bytes in.  Returns zero or more complete
+        data frames (each exactly PACKET_SIZE_BYTES long).  Any
+        leftover/partial bytes are buffered internally for the next call.
         """
 
     @abstractmethod
     def reset(self) -> None:
-        """Discard any buffered partial-frame bytes (e.g. after a
-        reconnect, to avoid stitching bytes from two different sessions
-        into one bogus frame)."""
+        """Discard any buffered partial-frame bytes."""
 
 
-class NullFrameExtractor(FrameExtractor):
-    """TODO: placeholder framing strategy.
+class SyncFrameExtractor(FrameExtractor):
+    """Robust stream parser with header/footer synchronization.
 
-    Assumes packets arrive back-to-back with no sync word, length field or
-    checksum, so it simply groups the accumulated byte stream into
-    PACKET_SIZE_BYTES chunks. If the serial link ever loses byte
-    synchronization (e.g. a byte is dropped or corrupted), this strategy
-    CANNOT detect or recover from it - all fields will appear shifted
-    until the connection is reset. Replace this with a real
-    `FrameExtractor` as soon as a sync word / checksum is defined.
+    Strategy: keep the incoming stream in a buffer and repeatedly try to
+    align the buffer so that a valid 90-byte frame sits at its head.
+    One byte is discarded at a time until either a full valid frame is
+    found (emitted) or there are not enough bytes to complete a frame yet
+    (in which case we wait for more bytes).
+
+    Handles:
+      - partial reads (buffered between feed() calls)
+      - multiple frames in a single read
+      - noise / random bytes before the header
+      - header split across multiple reads
+      - incomplete frames (not enough data yet)
+      - invalid footer (frame rejected, resync)
+      - back-to-back frames
     """
 
     def __init__(self) -> None:
         self._buffer = bytearray()
-
-    def feed(self, data: bytes) -> List[bytes]:
-        self._buffer.extend(data)
-        frames: List[bytes] = []
-        while len(self._buffer) >= PACKET_SIZE_BYTES:
-            frames.append(bytes(self._buffer[:PACKET_SIZE_BYTES]))
-            del self._buffer[:PACKET_SIZE_BYTES]
-        return frames
+        self.reset()
 
     def reset(self) -> None:
         self._buffer.clear()
 
+    def feed(self, data: bytes) -> List[bytes]:
+        self._buffer.extend(data)
+        frames: List[bytes] = []
+        while True:
+            frame = self._try_extract_one()
+            if frame is None:
+                break  # buffer too short to complete another frame
+            frames.append(frame)
+        return frames
+
+    def _try_extract_one(self) -> Optional[bytes]:
+        """Align the buffer to a valid frame and return its 84 data bytes,
+        or None if the buffer is too short to complete a frame right now.
+        Bytes that cannot begin a valid frame are discarded."""
+        while True:
+            if len(self._buffer) < FRAME_TOTAL_SIZE:
+                return None  # not enough bytes for even one full frame
+
+            if (self._buffer[0], self._buffer[1], self._buffer[2]) \
+                    != (0xAA, 0x55, 0xA5):
+                # Not a header at the buffer head: drop one byte and rescan.
+                del self._buffer[:1]
+                continue
+
+            # Header matches at head.  Check the footer.
+            footer = bytes(
+                self._buffer[HEADER_SIZE + PACKET_SIZE_BYTES:FRAME_TOTAL_SIZE]
+            )
+            if footer == SYNC_FOOTER:
+                data = bytes(self._buffer[HEADER_SIZE:HEADER_SIZE + PACKET_SIZE_BYTES])
+                del self._buffer[:FRAME_TOTAL_SIZE]
+                return data
+
+            # Header matched but footer invalid: this is not a valid frame.
+            # Drop just the first header byte and rescan — the frame is
+            # rejected, and the remaining bytes might contain another header.
+            del self._buffer[:1]
+
+
+# -- Packet decoder (endianness / signedness / scaling) -----------------------
 
 class PacketDecoder:
-    """Decodes one raw 84-byte frame into a dict of named field values,
-    according to a `PacketFormat`."""
+    """Decodes one raw 84-byte data frame into a dict of named float
+    values, applying per-field signedness interpretation and protocol
+    scaling (raw / divisor)."""
 
-    def __init__(self, fmt: PacketFormat):
-        self.fmt = fmt
-        self._struct = struct.Struct(
-            f"{fmt.struct_prefix}{len(PACKET_FIELDS)}{fmt.struct_code}"
-        )
-        assert self._struct.size == PACKET_SIZE_BYTES
+    def __init__(self) -> None:
+        self._structs = [
+            struct.Struct("<" + ("h" if signed else "H"))
+            for signed in FIELD_SIGNED
+        ]
+        self._scales = list(FIELD_SCALE)
 
-    def decode(self, frame: bytes) -> Dict[str, int]:
+    def decode(self, frame: bytes) -> Dict[str, float]:
         if len(frame) != PACKET_SIZE_BYTES:
             raise ValueError(
                 f"Frame is {len(frame)} bytes, expected {PACKET_SIZE_BYTES}"
             )
-        values = self._struct.unpack(frame)
-        return dict(zip(PACKET_FIELDS, values))
+        values: Dict[str, float] = {}
+        for i, name in enumerate(PACKET_FIELDS):
+            raw = self._structs[i].unpack_from(frame, i * BYTES_PER_FIELD)[0]
+            values[name] = raw / self._scales[i]
+        return values
 
+
+# -- Top-level parser ---------------------------------------------------------
 
 class PacketParser:
-    """Top-level parser: raw bytes in, `Packet` objects out. Combines a
-    `FrameExtractor` (framing/sync) with a `PacketDecoder`
-    (endianness/signedness) - see module docstring for why these are
-    separate.
-    """
+    """Top-level parser: raw bytes in, `Packet` objects out.  Combines a
+    `FrameExtractor` (framing/sync) with a `PacketDecoder` (decode +
+    scaling)."""
 
     def __init__(
         self,
-        fmt: Optional[PacketFormat] = None,
         frame_extractor: Optional[FrameExtractor] = None,
     ) -> None:
-        self.fmt = fmt or PacketFormat()
-        self._decoder = PacketDecoder(self.fmt)
-        self._framer = frame_extractor or NullFrameExtractor()
+        self._decoder = PacketDecoder()
+        self._framer = frame_extractor or SyncFrameExtractor()
         self._seq = 0
         self._malformed_count = 0
 
@@ -147,9 +163,7 @@ class PacketParser:
         return self._malformed_count
 
     def feed(self, data: bytes) -> List[Packet]:
-        """Feed newly-received bytes; returns any complete `Packet`s.
-        Correctly handles partial packets (buffered internally) and
-        multiple packets arriving in a single serial read."""
+        """Feed newly-received bytes; returns any complete `Packet`s."""
         packets: List[Packet] = []
         for frame in self._framer.feed(data):
             try:

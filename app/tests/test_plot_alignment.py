@@ -77,13 +77,13 @@ class PlotAlignmentTest(unittest.TestCase):
     # -- helpers to set up the "signal added mid-session" scenario ---------
     def add_signal_a(self):
         self.set_signals([
-            RawSignalConfig(name="PosA", source_field="position11", enabled=True)
+            RawSignalConfig(name="PosA", source_field="Position1", enabled=True)
         ])
 
     def add_signal_b(self):
         configs = self.win._last_active.get_configs()
         self.set_signals(configs + [
-            RawSignalConfig(name="PosB", source_field="position21", enabled=True),
+            RawSignalConfig(name="PosB", source_field="Position2", enabled=True),
         ])
 
     # ----------------------------------------------------------------------
@@ -151,8 +151,8 @@ class PlotAlignmentTest(unittest.TestCase):
         """When all signals are enabled before data starts, live + paused
         behavior is unchanged (slicing == time slicing)."""
         self.set_signals([
-            RawSignalConfig(name="PosA", source_field="position11", enabled=True),
-            RawSignalConfig(name="PosB", source_field="position21", enabled=True),
+            RawSignalConfig(name="PosA", source_field="Position1", enabled=True),
+            RawSignalConfig(name="PosB", source_field="Position2", enabled=True),
         ])
         self.feed(0, 200)
         self.refresh()
