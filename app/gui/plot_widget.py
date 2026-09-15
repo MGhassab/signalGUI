@@ -50,6 +50,95 @@ _AXIS_COLORS = [
     "#ff7f0e", "#17becf", "#e377c2", "#8c564b",
 ]
 
+# Display-only smoothing. Raw device samples arrive at ~20 Hz; drawing them as
+# straight chords makes a trace look angular/stair-stepped once you zoom in.
+# Before handing the data to pyqtgraph we resample it with a shape-preserving
+# cubic (PCHIP) so the drawn line follows a smooth curve. This never changes
+# the stored/semantic data - only what is painted. The cap keeps the render
+# cost bounded regardless of how much history is buffered.
+SMOOTH_DISPLAY = True
+DISPLAY_POINTS_PER_SECOND = 120
+MAX_RENDER_POINTS = 4000
+
+
+def _pchip_display_resample(x: np.ndarray, y: np.ndarray,
+                            points_per_second: int,
+                            max_output: int) -> Tuple[np.ndarray, np.ndarray]:
+    """Vectorized shape-preserving cubic (PCHIP) resample for DISPLAY ONLY.
+
+    Unlike a natural cubic spline, PCHIP does not overshoot, so genuine steps
+    and extrema are not exaggerated (important for step responses and
+    criteria metrics). Returns the input unchanged for degenerate inputs.
+    """
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    if x.size < 3:
+        return x, y
+
+    # Drop duplicate/non-increasing x samples (defensive; t is monotonic).
+    keep = np.r_[True, np.diff(x) > 1e-12]
+    x = x[keep]
+    y = y[keep]
+    n = x.size
+    if n < 3:
+        return x, y
+
+    duration = x[-1] - x[0]
+    if duration <= 0.0:
+        return x, y
+
+    n_out = min(max_output, max(n, int(duration * points_per_second) + 1))
+    xd = np.linspace(x[0], x[-1], n_out)
+
+    h = np.diff(x)
+    delta = np.diff(y) / h
+    m = np.zeros(n, dtype=float)
+
+    dl = delta[:-1]
+    dr = delta[1:]
+    same_sign = (dl * dr) > 0.0
+    h_prev = h[:-1]
+    h_next = h[1:]
+    w1 = 2.0 * h_next + h_prev
+    w2 = h_next + 2.0 * h_prev
+    interior = np.zeros(n - 2, dtype=float)
+    valid = same_sign & (dl != 0.0) & (dr != 0.0)
+    interior[valid] = (w1[valid] + w2[valid]) / (
+        w1[valid] / dl[valid] + w2[valid] / dr[valid]
+    )
+    m[1:-1] = interior
+
+    def endpoint(h0, h1, d0, d1):
+        slope = ((2.0 * h0 + h1) * d0 - h0 * d1) / (h0 + h1)
+        if np.sign(slope) != np.sign(d0):
+            return 0.0
+        if np.sign(d0) != np.sign(d1) and abs(slope) > abs(3.0 * d0):
+            return 3.0 * d0
+        return slope
+
+    m[0] = endpoint(h[0], h[1], delta[0], delta[1])
+    m[-1] = endpoint(h[-1], h[-2], delta[-1], delta[-2])
+
+    idx = np.clip(np.searchsorted(x, xd, side="right") - 1, 0, n - 2)
+    x0 = x[idx]
+    x1 = x[idx + 1]
+    y0 = y[idx]
+    y1 = y[idx + 1]
+    m0 = m[idx]
+    m1 = m[idx + 1]
+
+    hi = x1 - x0
+    t = (xd - x0) / hi
+    t2 = t * t
+    t3 = t2 * t
+    h00 = 2.0 * t3 - 3.0 * t2 + 1.0
+    h10 = t3 - 2.0 * t2 + t
+    h01 = -2.0 * t3 + 3.0 * t2
+    h11 = t3 - t2
+
+    yd = h00 * y0 + h10 * hi * m0 + h01 * y1 + h11 * hi * m1
+    return xd, yd
+
 
 class _SignalAxis:
     """One signal's independent Y ViewBox + AxisItem + curve.
@@ -64,9 +153,13 @@ class _SignalAxis:
         self.axis.setPen(color)
         self.axis.setTextPen(color)
         style = Qt.DashLine if derived else Qt.SolidLine
-        self.curve = pg.PlotCurveItem(
-            pen=pg.mkPen(color, width=1.5, style=style)
-        )
+        # Round joins/caps avoid the hard notches where segments meet, and
+        # antialias=True smooths the edges (also set globally in main.py, but
+        # set per-curve so the widget is smooth wherever it is used).
+        pen = pg.mkPen(color, width=1.5, style=style)
+        pen.setJoinStyle(Qt.RoundJoin)
+        pen.setCapStyle(Qt.RoundCap)
+        self.curve = pg.PlotCurveItem(pen=pen, antialias=True)
         self.view_box.addItem(self.curve)
 
 
@@ -84,6 +177,7 @@ class PlotWidget(pg.GraphicsLayoutWidget):
         self._next_color_idx = 0
         self._window_seconds: float = 30.0  # auto-scrolling time window
         self._time_tick_step: float = 0.0  # configured X major tick step
+        self._display_smooth: bool = SMOOTH_DISPLAY
 
         self._plot_item.vb.sigResized.connect(self._sync_views)
         self._plot_item.vb.sigRangeChangedManually.connect(
@@ -235,12 +329,26 @@ class PlotWidget(pg.GraphicsLayoutWidget):
         else:
             bottom.setTickSpacing()
 
+    def set_display_smoothing(self, enabled: bool) -> None:
+        """Enable/disable the display-only PCHIP resampling of curve data.
+
+        Disabling makes `curve.getData()` expose the raw samples (used by the
+        plot-alignment tests, which assert on exact sample counts/values).
+        """
+        self._display_smooth = bool(enabled)
+
     # -- data updates (real-time; never touches axis config) -------------------
     def update_signal_data(self, name: str, t: np.ndarray, y: np.ndarray) -> None:
         axis = self._axes.get(name)
         if axis is None or t is None or t.size == 0:
             return
-        axis.curve.setData(t, y)
+        if self._display_smooth and y.size >= 3:
+            plot_t, plot_y = _pchip_display_resample(
+                t, y, DISPLAY_POINTS_PER_SECOND, MAX_RENDER_POINTS
+            )
+        else:
+            plot_t, plot_y = t, y
+        axis.curve.setData(plot_t, plot_y)
         t_max = float(t[-1])
         self._plot_item.setXRange(
             max(0.0, t_max - self._window_seconds), t_max, padding=0

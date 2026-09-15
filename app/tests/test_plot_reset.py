@@ -48,6 +48,8 @@ class PlotResetTest(unittest.TestCase):
         self.win = MainWindow()
         self.win._plot_timer.stop()          # drive refresh manually
         self.win._last_active = self.win.new_panel()
+        # Assert on raw samples (not the display-only PCHIP resampling).
+        self.panel().plot_widget.set_display_smoothing(False)
         self.panel().set_signals([
             RawSignalConfig(name="PosA", source_field="Position1",
                             enabled=True, y_min=-10, y_max=10)

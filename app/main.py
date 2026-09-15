@@ -1,6 +1,7 @@
 """Application entry point."""
 import sys
 
+import pyqtgraph as pg
 from PySide6.QtWidgets import QApplication
 
 from gui.main_window import MainWindow
@@ -9,6 +10,7 @@ from gui.main_window import MainWindow
 def main() -> None:
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
+    pg.setConfigOptions(antialias=True)
     window = MainWindow()
     window.show()
     sys.exit(app.exec())

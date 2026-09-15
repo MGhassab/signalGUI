@@ -51,6 +51,9 @@ class PlotAlignmentTest(unittest.TestCase):
         self.win = MainWindow()
         self.win._plot_timer.stop()          # we drive refresh_plot() manually
         self.win._last_active = self.win.new_panel()  # one panel window
+        # These tests assert on exact raw sample counts/values on the curve;
+        # turn off the display-only PCHIP resampling so getData() stays raw.
+        self.panel().plot_widget.set_display_smoothing(False)
 
     def tearDown(self):
         self.win.close()
