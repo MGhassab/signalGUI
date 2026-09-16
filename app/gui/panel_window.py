@@ -21,12 +21,11 @@ Lifecycle:
 """
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import List
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QMainWindow
 
-from models.packet import Packet
 from models.signal_config import SignalConfig
 from gui.graph_panel import GraphPanel
 
@@ -35,7 +34,7 @@ _DEFAULT_HEIGHT = 560
 
 
 class PanelWindow(QMainWindow):
-    def __init__(self, manager, title: str,
+    def __init__(self, manager, title: str, core,
                  signals: List[SignalConfig] | None = None,
                  time_step: float = 1.0):
         super().__init__(manager)
@@ -45,7 +44,7 @@ class PanelWindow(QMainWindow):
         self.setWindowTitle(title)
         self.resize(_DEFAULT_WIDTH, _DEFAULT_HEIGHT)
 
-        self.panel = GraphPanel(self)
+        self.panel = GraphPanel(core, self)
         self.panel.set_time_step(time_step)
         self.setCentralWidget(self.panel)
         if signals:
@@ -68,10 +67,11 @@ class PanelWindow(QMainWindow):
     def get_time_step(self) -> float:
         return self.panel.get_time_step()
 
-    # -- runtime data --------------------------------------------------------
-    def on_packet(self, packet: Packet, t: Optional[float] = None) -> None:
-        self.panel.on_packet(packet, t)
+    @property
+    def panel_id(self) -> int:
+        return self.panel.panel_id
 
+    # -- runtime data --------------------------------------------------------
     def begin_new_session(self) -> None:
         self.panel.begin_new_session()
 

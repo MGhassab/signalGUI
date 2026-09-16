@@ -33,9 +33,7 @@ from PySide6.QtWidgets import (
     QToolButton, QLabel, QDoubleSpinBox, QCheckBox,
 )
 
-from models.packet import Packet
 from models.signal_config import SignalConfig, SignalType
-from processing.signal_manager import SignalManager
 from gui.live_value_table import LiveValueTable
 from gui.plot_widget import PlotWidget
 from gui.playback_controller import PlaybackController
@@ -46,9 +44,13 @@ _DEFAULT_TIME_TICK = 1.0  # seconds per major X-axis tick
 
 
 class GraphPanel(QWidget):
-    def __init__(self, parent=None):
+    def __init__(self, core, parent=None):
         super().__init__(parent)
-        self._signal_manager = SignalManager()
+        # This panel's processed data lives in the shared, thread-safe
+        # acquisition core (fed by the serial thread). The GUI only reads
+        # snapshots from it - it never processes packets itself.
+        self._core = core
+        self._panel_id = core.register_panel()
         self._sized = False
         self._dt = _DEFAULT_TIME_TICK
         self._playback = PlaybackController()
@@ -175,7 +177,7 @@ class GraphPanel(QWidget):
 
     def _on_signals_changed(self) -> None:
         configs = self.signal_panel.get_configs()
-        self._signal_manager.set_signals(configs)
+        self._core.set_panel_signals(self._panel_id, configs)
         valid = {c.name for c in configs}
         self._plot_hidden &= valid
         self._resync_plot_axes()
@@ -250,32 +252,14 @@ class GraphPanel(QWidget):
         """Latest sample time present on this panel (max over enabled
         signals). Signals are fed from the same packet stream, so in steady
         state this is the current global acquisition time."""
-        latest: Optional[float] = None
-        for cfg in self.signal_panel.get_configs():
-            if not cfg.enabled:
-                continue
-            t, _ = self._signal_manager.get_plot_data(cfg.name)
-            if t is not None and t.size:
-                cand = float(t[-1])
-                if latest is None or cand > latest:
-                    latest = cand
-        return latest
+        return self._core.latest_time(self._panel_id)
 
     def _sample_times(self) -> np.ndarray:
         """Sorted unique sample times present on this panel (the global time
         axis). Signals enabled mid-session expose only their own later
         window, so the union across signals is the panel's viewable timeline.
         """
-        arrays = []
-        for cfg in self.signal_panel.get_configs():
-            if not cfg.enabled:
-                continue
-            t, _ = self._signal_manager.get_plot_data(cfg.name)
-            if t is not None and t.size:
-                arrays.append(t)
-        if not arrays:
-            return np.empty(0)
-        return np.unique(np.concatenate(arrays))
+        return self._core.sample_times(self._panel_id)
 
     def _step_time(self, delta: int) -> None:
         """Move the paused playhead by one real sample on the shared time
@@ -297,29 +281,31 @@ class GraphPanel(QWidget):
             self._playback.seek(float(after[0]) if after.size else latest)
 
     # -- runtime data --------------------------------------------------------
-    def on_packet(self, packet: Packet, t: Optional[float] = None) -> None:
-        if t is None:
-            t = packet.arrival_time
-        self._signal_manager.on_packet(packet, t)
-        self.value_table.update_data(
-            self._signal_manager.get_latest_data_values()
-        )
+    @property
+    def panel_id(self) -> int:
+        return self._panel_id
+
+    def _update_readout(self) -> None:
+        """Refresh the Name/Value readout from the latest computed values.
+
+        Called on the refresh cadence (NOT per packet), so a high incoming
+        rate never turns into thousands of QTableWidget item updates per
+        second on the GUI thread.
+        """
+        self.value_table.update_data(self._core.latest_data_values(self._panel_id))
         self.value_table.update_signal_values(
-            self._signal_manager.get_latest_signal_outputs()
+            self._core.latest_signal_outputs(self._panel_id)
         )
 
     def begin_new_session(self) -> None:
-        """Clear this panel's data for a new (global) acquisition session.
+        """Reset this panel's DISPLAY for a new acquisition session.
 
-        The global time origin itself is owned by the AcquisitionManager;
-        this only clears local buffers and raw readouts so every panel
-        restarts aligned at the session's t = 0.
+        The shared acquisition core (`begin_session`) has already cleared
+        the global timeline and every panel's buffers, so this only resets
+        the local plot/readout presentation to the session's t = 0.
         """
-        self._signal_manager.reset_session()
         self.plot_widget.clear_curves()
-        self.value_table.update_data(
-            self._signal_manager.get_latest_data_values()
-        )
+        self.value_table.update_data(self._core.latest_data_values(self._panel_id))
         self.value_table.clear_signal_values()
         self._last_paused_end = None
         self._playback.resume()
@@ -335,6 +321,10 @@ class GraphPanel(QWidget):
         stepping backward/forward stays time-aligned even when signals have
         different start times.
         """
+        # Readout is throttled to this refresh cadence (decoupled from the
+        # packet rate), and reflects the latest values even while paused.
+        self._update_readout()
+
         if self._playback.is_paused():
             cut = self._playback.cut_time()
             if cut is None:
@@ -353,10 +343,10 @@ class GraphPanel(QWidget):
                 continue
             if cfg.name in self._plot_hidden:
                 # Plot is hidden: keep the curve empty but do not short-circuit
-                # numeric updates (those happen in on_packet, independently).
+                # the readout (updated independently in _update_readout).
                 self.plot_widget.clear_signal(cfg.name)
                 continue
-            t, y = self._signal_manager.get_plot_data(cfg.name)
+            t, y = self._core.plot_data(self._panel_id, cfg.name)
             if t is None or t.size == 0:
                 continue
             if cut is not None:
@@ -373,7 +363,7 @@ class GraphPanel(QWidget):
                 self.plot_widget.update_signal_data(cfg.name, t, y)
 
     def clear(self) -> None:
-        self._signal_manager.clear_all()
+        self._core.clear_panel(self._panel_id)
         self.plot_widget.clear_curves()
         self.value_table.clear_signal_values()
 
@@ -386,7 +376,7 @@ class GraphPanel(QWidget):
         serial, other panels).
         """
         # Clear data/history (both buffers and on-screen curves).
-        self._signal_manager.clear_all()
+        self._core.clear_panel(self._panel_id)
         self.plot_widget.clear_curves()
 
         # Restore playback to live / latest.

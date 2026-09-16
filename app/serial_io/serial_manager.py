@@ -1,37 +1,48 @@
 """Background serial I/O. Reception runs entirely inside a QThread so the
-GUI thread never blocks on a serial read. The GUI only ever talks to
-`SerialManager` through Qt signals/slots - it must never touch pyserial
-or the packet parser directly (see gui/main_window.py).
+GUI thread never blocks on a serial read, and - crucially - packet
+processing also happens there: the worker feeds decoded packets straight
+into the shared `AcquisitionCore` instead of emitting one Qt signal per
+packet. The GUI only reads snapshots at its own refresh cadence (see
+`acquisition/core.py`), so a high incoming rate can never flood the GUI
+event queue or cause missed/corrupted samples.
 """
 from __future__ import annotations
 
-from typing import Optional
+import time
+from typing import List, Optional
 
 import serial
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 
-from serial_io.packet_parser import PacketParser
+from serial_io.packet_parser import PacketParser, FRAME_TOTAL_SIZE
 
 READ_CHUNK_SIZE = 4096
 READ_TIMEOUT_S = 0.1
 
+# Serial framing is 8N1: 1 start + 8 data + 1 stop = 10 bits per byte on
+# the wire. Used to reconstruct a per-frame arrival time from the byte
+# count and the configured baud rate (see _SerialWorker.run).
+BITS_PER_BYTE = 10
+
 
 class _SerialWorker(QObject):
     """Lives inside the worker QThread. Owns the actual serial.Serial
-    instance and drives the packet parser for the current connection."""
+    instance, drives the packet parser for the current connection, stamps
+    per-frame times, and feeds the shared acquisition core."""
 
-    packetReceived = Signal(object)          # Packet
     connectionLost = Signal(str)             # error message
     errorOccurred = Signal(str)
     started_ok = Signal()
 
-    def __init__(self, port: str, baudrate: int, parser: PacketParser):
+    def __init__(self, port: str, baudrate: int, parser: PacketParser, core):
         super().__init__()
         self._port_name = port
         self._baudrate = baudrate
         self._parser = parser
+        self._core = core
         self._serial: Optional[serial.Serial] = None
         self._running = False
+        self._last_stamp = 0.0
 
     @Slot()
     def run(self) -> None:
@@ -51,7 +62,17 @@ class _SerialWorker(QObject):
 
         self._running = True
         self._parser.reset()
+        self._last_stamp = 0.0
+        # Start the new session HERE, before reading anything: because this
+        # worker thread feeds the core directly, resetting it must be
+        # ordered before the first packet of the new connection or those
+        # samples would be wiped by the reset.
+        if self._core is not None:
+            self._core.begin_session()
         self.started_ok.emit()
+
+        # Wire time for one complete frame, at the configured baud rate.
+        frame_seconds = BITS_PER_BYTE * FRAME_TOTAL_SIZE / max(1, self._baudrate)
 
         while self._running:
             try:
@@ -64,12 +85,39 @@ class _SerialWorker(QObject):
                 self.connectionLost.emit(str(exc))
                 break
 
-            if data:
-                for pkt in self._parser.feed(data):
-                    self.packetReceived.emit(pkt)
+            if not data:
+                continue
+
+            # Timestamp at the moment the bytes were read: the last byte of
+            # the last complete frame arrived at/just before `now`.
+            now = time.monotonic()
+            packets = self._parser.feed(data)
+            if packets:
+                self._stamp_packets(packets, now, frame_seconds)
+                # Process in this (non-GUI) thread; the GUI only reads
+                # snapshots, so it cannot miss or corrupt samples.
+                self._core.on_packets(packets)
 
         if self._serial is not None and self._serial.is_open:
             self._serial.close()
+
+    def _stamp_packets(self, packets: List, now: float,
+                       frame_seconds: float) -> None:
+        """Assign each decoded frame a per-frame arrival time.
+
+        Frames completed within this read are spaced one frame-transmit
+        time apart, ending at `now`. The running `_last_stamp` clamp keeps
+        times strictly non-decreasing even if reads arrive irregularly or
+        a frame completed from buffered leftover bytes.
+        """
+        k = len(packets)
+        base = now - (k - 1) * frame_seconds
+        for i, packet in enumerate(packets):
+            t = base + i * frame_seconds
+            if t <= self._last_stamp:
+                t = self._last_stamp + 1e-9
+            packet.arrival_time = t
+            self._last_stamp = t
 
     @Slot()
     def stop(self) -> None:
@@ -84,14 +132,14 @@ class SerialManager(QObject):
     QThread lifecycle management.
     """
 
-    packetReceived = Signal(object)   # Packet
     connected = Signal()
     disconnected = Signal(str)        # reason; "" if user-initiated
     errorOccurred = Signal(str)
 
-    def __init__(self, parser: PacketParser):
+    def __init__(self, parser: PacketParser, core):
         super().__init__()
         self._parser = parser
+        self._core = core
         self._thread: Optional[QThread] = None
         self._worker: Optional[_SerialWorker] = None
         self._is_connected = False
@@ -104,11 +152,10 @@ class SerialManager(QObject):
         if self._is_connected or self._thread is not None:
             return
         self._thread = QThread()
-        self._worker = _SerialWorker(port, baudrate, self._parser)
+        self._worker = _SerialWorker(port, baudrate, self._parser, self._core)
         self._worker.moveToThread(self._thread)
 
         self._thread.started.connect(self._worker.run)
-        self._worker.packetReceived.connect(self.packetReceived)
         self._worker.started_ok.connect(self._on_started_ok)
         self._worker.connectionLost.connect(self._on_connection_lost)
         self._worker.errorOccurred.connect(self._on_error)

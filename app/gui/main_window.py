@@ -31,7 +31,7 @@ from gui.serial_settings_widget import SerialSettingsWidget
 from gui.panel_window import PanelWindow
 from gui.serial_config_dialog import prompt_serial_config
 
-from acquisition.manager import AcquisitionManager
+from acquisition.core import AcquisitionCore
 from models.packet import Packet
 from models.app_config import AppConfig, PanelConfig
 from serial_io.packet_parser import PacketParser
@@ -50,13 +50,15 @@ class MainWindow(QMainWindow):
         # Protocol interpretation is centralized in the packet decoder
         # (per-field signedness + scaling) — change it in models/packet.py.
         self._parser = PacketParser()
-        self._serial = SerialManager(self._parser)
+
+        # Thread-safe acquisition core: the serial worker thread feeds it
+        # (read + parse + process), the GUI only reads snapshots from it.
+        # This decouples a high incoming packet rate from visualization.
+        self._core = AcquisitionCore()
+        self._serial = SerialManager(self._parser, self._core)
 
         self._serial_port: str = ""
         self._baud_rate: int = 115200
-
-        # Centralized acquisition timeline (single source of truth for time).
-        self._acq = AcquisitionManager()
 
         # -- panel registry --------------------------------------------------
         self._panels: List[PanelWindow] = []
@@ -149,7 +151,6 @@ class MainWindow(QMainWindow):
         self._serial.connected.connect(self._on_connected)
         self._serial.disconnected.connect(self._on_disconnected)
         self._serial.errorOccurred.connect(self._on_serial_error)
-        self._serial.packetReceived.connect(self._on_packet)
 
         self.serial_widget.connectRequested.connect(self._on_connect)
         self.serial_widget.disconnectRequested.connect(self._serial.disconnect)
@@ -175,7 +176,7 @@ class MainWindow(QMainWindow):
                 title = f"Panel {self._panel_counter}"
 
         window = PanelWindow(
-            self, title,
+            self, title, self._core,
             signals=signals,
             time_step=time_step if time_step is not None else 1.0,
         )
@@ -184,9 +185,8 @@ class MainWindow(QMainWindow):
 
         # If acquisition already started, backfill the retained history so
         # this panel immediately sits on the SAME global timeline.
-        if self._acq.has_history():
-            for history_t, history_packet in self._acq.iter_entries():
-                window.on_packet(history_packet, history_t)
+        if self._core.has_history():
+            self._core.backfill_panel(window.panel_id)
 
         base = self.frameGeometry().topLeft()
         offset = (len(self._panels) - 1) % 8
@@ -247,6 +247,7 @@ class MainWindow(QMainWindow):
         """A panel was really destroyed - remove it from the registry."""
         if window in self._panels:
             self._panels.remove(window)
+        self._core.unregister_panel(window.panel_id)
         if self._last_active is window:
             self._last_active = None
         self._refresh_panel_ui()
@@ -321,10 +322,9 @@ class MainWindow(QMainWindow):
         self.serial_widget.set_connected(
             True, self._serial_port, self._baud_rate
         )
-        # Every successful connect starts a NEW acquisition session: global
-        # time resets to 0 (anchored by the first received packet) and every
-        # panel's data is cleared so all panels restart aligned.
-        self._acq.begin()
+        # The acquisition worker already reset the shared core (new session,
+        # global time = 0) before it began reading, so here we only reset the
+        # per-panel DISPLAY so all panels visually restart aligned.
         for window in list(self._panels):
             window.begin_new_session()
         self.statusBar().showMessage(
@@ -366,11 +366,11 @@ class MainWindow(QMainWindow):
     # -- packets + plotting ----------------------------------------------------
     @Slot(object)
     def _on_packet(self, packet: Packet) -> None:
-        # Assign ONE global timestamp BEFORE distributing to the panels so
-        # every panel/signal shares the exact same acquisition timeline.
-        t = self._acq.feed(packet)
-        for window in list(self._panels):
-            window.on_packet(packet, t)
+        # Synchronous ingestion path (used by tests and any direct caller).
+        # Live acquisition feeds the same core from the serial worker thread
+        # via `AcquisitionCore.on_packets`; the core assigns ONE global
+        # timestamp before distributing to every panel.
+        self._core.on_packet(packet)
 
     def _refresh_all_plots(self) -> None:
         for window in list(self._panels):

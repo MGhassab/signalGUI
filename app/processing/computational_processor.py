@@ -97,9 +97,22 @@ class _DerivativeStage:
             return None  # degenerate span: no usable timing information
         # Least-squares fit value(t) ~ c0 + c1*(t - center) + c2*(t - center)^2
         # in MEASURED time. Slope at the center is c1.
+        #
+        # Solved via the normal equations (A^T A) c = A^T y. The system is
+        # tiny (degree+1 <= 3) so the closed-form 3x3 solve is far cheaper
+        # than np.linalg.lstsq's SVD and yields the same least-squares
+        # coefficients - important because this runs once per sample per
+        # derivative stage on the acquisition path.
         design = np.vander(times - center_t, self._poly_degree + 1,
                            increasing=True)
-        coef, *_ = np.linalg.lstsq(design, values, rcond=None)
+        normal = design.T @ design
+        rhs = design.T @ values
+        try:
+            coef = np.linalg.solve(normal, rhs)
+        except np.linalg.LinAlgError:
+            # Degenerate/ill-conditioned window (e.g. coincident times):
+            # fall back to the robust pseudo-inverse solution.
+            coef, *_ = np.linalg.lstsq(design, values, rcond=None)
         slope = float(coef[1])
         if not math.isfinite(slope):
             return None

@@ -50,11 +50,18 @@ panel:
   graph) and *Signal Configuration* (that panel's signal table). Each panel
   owns its own processor state, so editing one panel's signals never
   affects another panel.
-- **Packets** are fanned out to every open panel; each panel computes only
-  its own enabled signals on a shared, throttled (50 ms) plot-refresh timer.
-- **One global acquisition timeline**: every packet receives a single
-  timestamp from the centralized `AcquisitionManager` before it is
-  distributed, so all panels/signals share the same X-axis time reference.
+- **Acquisition is decoupled from visualization.** The serial worker thread
+  reads, parses, timestamps, and processes every packet directly into a
+  shared, lock-protected `AcquisitionCore`; the GUI thread never processes
+  packets. It only reads detached snapshots (copies) at its own throttled
+  (50 ms) plot/readout cadence. A high incoming packet rate therefore cannot
+  flood the GUI event queue or cause missed/corrupted samples, and the GUI
+  can take as long as it needs to redraw without stalling acquisition.
+- **One global acquisition timeline**: the core assigns a single timestamp
+  to each packet before fanning it out, so all panels/signals share the same
+  X-axis time reference. Per-frame arrival times are reconstructed from the
+  byte count and baud rate (8N1), so the time axis stays correctly spaced at
+  any baud rate instead of collapsing one read's frames onto one instant.
   A new session (time resets to 0) starts on each serial Connect; creating
   a panel/signal later never re-zeros time, and new panels backfill the
   retained global history so side-by-side panels are comparable.
@@ -65,7 +72,8 @@ panel:
 app/
 ├── main.py
 ├── acquisition/
-│   └── manager.py          # centralized global acquisition timeline + history
+│   ├── core.py             # thread-safe global timeline + per-panel processing + snapshots
+│   └── manager.py          # (legacy) standalone timeline/history helper
 ├── gui/
 │   ├── main_window.py        # controller: menus, serial, panel registry, packet fan-out
 │   ├── panel_manager.py      # Main-Window list of panels (new/show/hide/rename/delete)
@@ -179,3 +187,33 @@ into one end while the app reads the other.
   `serial_io/packet_parser.py`.
 - **New criterion**: write a `CriterionCalculator` subclass and register
   it in `processing/criteria/calculators/__init__.py`.
+
+## Troubleshooting
+
+### Windows: `ImportError: DLL load failed while importing QtWidgets: The specified procedure could not be found`
+
+PySide6 located a Qt DLL but it is incompatible with what it expected
+(Windows error 127 = "DLL found, but an expected export is missing"). This is
+an environment problem, not an application bug. It is most often a too-old
+Visual C++ runtime or a mixed/corrupt PySide6 install. Fix it in order:
+
+1. Install the **Microsoft Visual C++ Redistributable for Visual Studio
+   2015-2022 (x64)**: `https://aka.ms/vs/17/release/vc_redist.x64.exe`,
+   then reboot if prompted.
+2. Clean-reinstall PySide6 into the interpreter you actually run:
+   ```bat
+   python -m pip uninstall -y PySide6 PySide6-Addons PySide6-Essentials shiboken6
+   python -m pip install --upgrade pip
+   python -m pip install --no-cache-dir --force-reinstall PySide6
+   python -c "import PySide6.QtCore, PySide6.QtGui, PySide6.QtWidgets; print('OK')"
+   ```
+3. If it still fails, pin a known-good release:
+   ```bat
+   python -m pip install --force-reinstall "PySide6==6.8.3"
+   ```
+
+Use `python -m pip` (not bare `pip`) so packages go into the interpreter that
+runs the app, and confirm a single matching set is installed:
+`python -m pip list | findstr /I "pyside shiboken"`. A stray `Qt6Core.dll`
+outside `site-packages\PySide6\` (e.g. from another Qt/Anaconda install on
+`PATH`) causes the same error and must be removed from `PATH`.

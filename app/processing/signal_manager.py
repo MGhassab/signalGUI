@@ -8,10 +8,10 @@ touches processors or raw packet fields directly - it only calls
 `get_latest_signal_outputs()`.
 
 TIME IS GLOBAL: `on_packet` receives the timestamp `t` already assigned by
-the centralized `AcquisitionManager` (see acquisition/manager.py). This
-manager NEVER computes its own time origin, so every panel/signal shares
-the same acquisition timeline regardless of when the panel or signal was
-created. Clearing a panel's buffers does not reset the global time.
+the centralized `AcquisitionCore` (see acquisition/core.py). This manager
+NEVER computes its own time origin, so every panel/signal shares the same
+acquisition timeline regardless of when the panel or signal was created.
+Clearing a panel's buffers does not reset the global time.
 
 Two kinds of rows are handled:
 
@@ -41,8 +41,14 @@ from processing.criteria import CriteriaEngine
 from processing.ring_buffer import RingBuffer
 
 # Bounded samples retained per signal for plotting - prevents unbounded
-# memory growth during long-running acquisitions.
+# memory growth during long-running acquisitions. At high sample rates a
+# fixed 5000 samples would wrap long before the ~30 s plot window is full
+# (making the trace look truncated), so a full buffer whose TIME span is
+# still below the window grows (doubling) up to PLOT_HISTORY_MAX. At normal
+# rates the window is already covered and the buffer never grows.
 PLOT_HISTORY_CAPACITY = 5000
+PLOT_HISTORY_MAX = 100_000
+PLOT_HISTORY_SECONDS = 30.0
 
 _PROCESSOR_CLASSES = {
     SignalType.RAW: RawProcessor,
@@ -183,12 +189,27 @@ class SignalManager:
             for out_t, output in rt.processor.process(raw_value, t):
                 rt.time_buffer.append(out_t)
                 rt.value_buffer.append(output)
+            self._maybe_grow(rt)
 
         # Pass 2: derived criteria signals (source signals already updated).
         for rt in self._runtimes.values():
             if rt.engine is None or not rt.config.enabled:
                 continue
             self._update_criteria(rt, packet, t)
+
+    def _maybe_grow(self, rt: "_SignalRuntime") -> None:
+        """Grow a full buffer whose time span is still shorter than the plot
+        window, so high-rate signals keep the same visible history instead of
+        wrapping early. No-op at normal rates (span already covers window)."""
+        tb = rt.time_buffer
+        if len(tb) < tb.capacity or tb.capacity >= PLOT_HISTORY_MAX:
+            return
+        span = tb.last() - tb.first()
+        if span >= PLOT_HISTORY_SECONDS:
+            return
+        new_capacity = min(tb.capacity * 2, PLOT_HISTORY_MAX)
+        rt.time_buffer = tb.grown(new_capacity)
+        rt.value_buffer = rt.value_buffer.grown(new_capacity)
 
     def _update_criteria(self, rt: _SignalRuntime, packet: Packet, t: float) -> None:
         cfg: CriteriaSignalConfig = rt.config
@@ -220,6 +241,7 @@ class SignalManager:
         output = rt.engine.update(t, source, float(reference))
         rt.time_buffer.append(t)
         rt.value_buffer.append(output)
+        self._maybe_grow(rt)
 
     def get_plot_data(self, name: str) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
         rt = self._runtimes.get(name)
@@ -237,9 +259,8 @@ class SignalManager:
         for name, rt in self._runtimes.items():
             if not rt.config.enabled:
                 continue
-            vals = rt.value_buffer.as_array()
-            if vals.size:
-                outputs[name] = float(vals[-1])
+            if len(rt.value_buffer):
+                outputs[name] = rt.value_buffer.last()
         return outputs
 
     def clear_all(self) -> None:
