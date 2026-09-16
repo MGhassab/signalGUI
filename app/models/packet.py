@@ -84,9 +84,9 @@ PACKET_SIZE_BYTES = len(PACKET_FIELDS) * BYTES_PER_FIELD  # 84 bytes
 # OD_DATA fields: raw/auxiliary display values shown in the left table.
 DATA_FIELDS: List[str] = [f"OD_DATA{i}" for i in range(1, 13)]
 
-# The Position group: channels that may be used as a criteria signal's
+# The Command group: channels that may be used as a criteria signal's
 # REFERENCE (see models/signal_config.py).
-POSITION4_FIELDS: List[str] = ["Position1", "Position2", "Position3", "Position4"]
+REFERENCE_FIELDS: List[str] = ["Command1", "Command2", "Command3", "Command4"]
 
 # Fields that MAY be used as a normal signal's source / a criteria SOURCE.
 # OD_DATA fields are deliberately excluded: they are raw/auxiliary
@@ -96,7 +96,7 @@ SIGNAL_FIELDS: List[str] = [f for f in PACKET_FIELDS if f not in DATA_FIELDS]
 assert len(PACKET_FIELDS) == 42, "Packet layout must have exactly 42 fields"
 assert len(FIELD_SIGNED) == 42
 assert len(FIELD_SCALE) == 42
-assert all(f in PACKET_FIELDS for f in POSITION4_FIELDS)
+assert all(f in PACKET_FIELDS for f in REFERENCE_FIELDS)
 
 
 @dataclass

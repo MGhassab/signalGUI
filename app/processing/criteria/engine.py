@@ -1,5 +1,5 @@
 """Criteria engine: derives control-performance metrics from a SOURCE
-signal evaluated against a POSITION-4 REFERENCE channel.
+signal evaluated against a Command REFERENCE channel.
 
 Pipeline for one criteria signal:
 

@@ -144,7 +144,7 @@ inside the app.
 
 5. **Criteria signals are derived Source->Reference metrics.** A Criteria
    row compares one SOURCE (a configured signal or a raw channel) against
-   a POSITION-4 reference channel (`position41..position44`, the only valid
+   a Command reference channel (`Command1..Command4`, the only valid
    references) and reports one metric: steady-state error, settling time,
    rise/fall time, overshoot, or inverse response. On each reference step
    the engine (`processing/criteria/engine.py`) captures the response and

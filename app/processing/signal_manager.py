@@ -18,7 +18,7 @@ Two kinds of rows are handled:
 1. Raw / Computational signals - single-input processors fed one raw
    packet value per tick (unchanged).
 2. Criteria signals - DERIVED metrics that compare a SOURCE (a configured
-   signal in this panel, or a raw channel) against a POSITION-4 reference
+   signal in this panel, or a raw channel) against a Command reference
    channel via a `CriteriaEngine`. Criteria rows are updated in a second
    pass (after ordinary signals), so a criteria row whose source is another
    signal sees that signal's freshly-appended value for the same packet.

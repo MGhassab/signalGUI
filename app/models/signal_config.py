@@ -5,10 +5,10 @@ kind-specific parameters. These are plain dataclasses so they serialize to
 / from JSON trivially (see config/config_manager.py).
 
 A Criteria signal is a DERIVED signal: it compares one SOURCE (a
-configured signal or a raw packet channel) against a REFERENCE (always one
-of the Position-4 channels) and reports a single control-performance
-metric. One criteria configuration = one metric (ESS, settling time, rise
-time, fall time, overshoot, or inverse response).
+configured signal or a raw packet channel) against a REFERENCE (one of the
+Command channels) and reports a single control-performance metric. One
+criteria configuration = one metric (ESS, settling time, rise time, fall
+time, overshoot, or inverse response).
 """
 from __future__ import annotations
 
@@ -16,7 +16,22 @@ from dataclasses import dataclass, field, asdict
 from enum import Enum
 from typing import Any, Dict
 
-from models.packet import POSITION4_FIELDS
+from models.packet import REFERENCE_FIELDS
+
+# Saved criteria configs written before references moved from the Position
+# group to the Command group are migrated on load so the engine and the
+# editor always see a currently-selectable reference.
+_LEGACY_REFERENCE_FIELDS = {
+    "Position1": "Command1",
+    "Position2": "Command2",
+    "Position3": "Command3",
+    "Position4": "Command4",
+}
+
+
+def normalize_reference_field(value: str) -> str:
+    """Map a legacy Position reference to its Command equivalent."""
+    return _LEGACY_REFERENCE_FIELDS.get(value, value)
 
 
 class SignalType(str, Enum):
@@ -99,7 +114,7 @@ class ComputationalSignalConfig(SignalConfig):
 @dataclass
 class CriteriaSignalConfig(SignalConfig):
     """A derived control-performance metric computed from a source signal
-    and a Position-4 reference channel (see processing/criteria/engine.py).
+    and a Command reference channel (see processing/criteria/engine.py).
 
     `source_field` (the base field) holds the raw channel when
     `source_kind == FIELD`; `source_signal` names the configured panel
@@ -110,7 +125,7 @@ class CriteriaSignalConfig(SignalConfig):
 
     source_kind: SourceKind = SourceKind.SIGNAL
     source_signal: str = ""
-    reference_field: str = POSITION4_FIELDS[0]
+    reference_field: str = REFERENCE_FIELDS[0]
     criterion: Criterion = Criterion.STEADY_STATE_ERROR
 
     ss_error_percent: bool = False
@@ -159,6 +174,11 @@ def signal_config_from_dict(d: Dict[str, Any]) -> SignalConfig:
         d["operation"] = Operation(d.get("operation", Operation.INTEGRAL.value))
         return ComputationalSignalConfig(**d)
     if stype == SignalType.CRITERIA:
+        # References moved from the Position group to the Command group;
+        # migrate saved configs so old references keep resolving.
+        d["reference_field"] = normalize_reference_field(
+            d.get("reference_field", REFERENCE_FIELDS[0])
+        )
         # Legacy placeholder criteria configs carried only
         # ess_criteria_pct / delay_criteria_pct; map them to the
         # steady-state-error criterion with the legacy tolerance.

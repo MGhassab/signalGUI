@@ -1,9 +1,9 @@
 """Editor for one Criteria signal configuration.
 
 A criteria signal compares a SOURCE (a configured signal or a raw packet
-channel) against a REFERENCE (always one of the Position-4 channels) and
-reports one control-performance metric. The parameter area is dynamic: it
-only shows the fields relevant to the currently selected criterion.
+channel) against a REFERENCE (one of the Command channels) and reports one
+control-performance metric. The parameter area is dynamic: it only shows
+the fields relevant to the currently selected criterion.
 """
 from __future__ import annotations
 
@@ -16,9 +16,10 @@ from PySide6.QtWidgets import (
     QWidget, QGroupBox, QMessageBox,
 )
 
-from models.packet import SIGNAL_FIELDS, POSITION4_FIELDS
+from models.packet import SIGNAL_FIELDS, REFERENCE_FIELDS
 from models.signal_config import (
     SignalConfig, SignalType, SourceKind, Criterion, CriteriaSignalConfig,
+    normalize_reference_field,
 )
 
 _CRITERION_LABELS = {
@@ -69,8 +70,8 @@ class CriteriaSignalDialog(QDialog):
         src_form.addRow("Source Signal:", self.source_combo)
 
         self.reference_combo = QComboBox()
-        self.reference_combo.addItems(POSITION4_FIELDS)
-        src_form.addRow("Reference Signal (Position 4):", self.reference_combo)
+        self.reference_combo.addItems(REFERENCE_FIELDS)
+        src_form.addRow("Reference Signal:", self.reference_combo)
 
         outer.addWidget(src_group)
 
@@ -226,7 +227,8 @@ class CriteriaSignalDialog(QDialog):
     # -- populate / build -------------------------------------------------------
     def _populate_from(self, cfg: CriteriaSignalConfig) -> None:
         self._select_source(SourceKind(cfg.source_kind), cfg.source_label)
-        ref_idx = self.reference_combo.findText(cfg.reference_field)
+        ref_field = normalize_reference_field(cfg.reference_field)
+        ref_idx = self.reference_combo.findText(ref_field)
         if ref_idx >= 0:
             self.reference_combo.setCurrentIndex(ref_idx)
         crit_idx = self.criterion_combo.findData(Criterion(cfg.criterion))
@@ -291,8 +293,9 @@ class CriteriaSignalDialog(QDialog):
             errors.append("Source signal cannot be empty.")
         if not reference:
             errors.append("Reference signal cannot be empty.")
-        if reference not in POSITION4_FIELDS:
-            errors.append("Reference signal must be a Position-4 channel.")
+        if reference not in REFERENCE_FIELDS:
+            errors.append("Reference signal must be a Command channel "
+                          "(Command1\u2013Command4).")
         if crit is None:
             errors.append("Select at least one criterion.")
 
