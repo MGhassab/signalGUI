@@ -61,6 +61,21 @@ def _criteria_params(a: CriteriaSignalConfig, b: CriteriaSignalConfig) -> bool:
     return all(getattr(a, f) == getattr(b, f) for f in fields)
 
 
+# A Raw/Computational processor reads its own `config` reference every
+# sample. Only these two fields change the processor's internal STRUCTURE
+# (mode selection / derivative window sizes); everything else (gain,
+# offset, source field, enable) can be re-pointed in place without losing
+# the processor's accumulated state or this signal's plot history.
+_PROCESSOR_STRUCTURAL_FIELDS = ("operation", "x_degree")
+
+
+def _processor_params(a: SignalConfig, b: SignalConfig) -> bool:
+    """True when the processing STRUCTURE is unchanged, so the existing
+    processor can be kept and merely pointed at the new config."""
+    return all(getattr(a, f, None) == getattr(b, f, None)
+               for f in _PROCESSOR_STRUCTURAL_FIELDS)
+
+
 @dataclass
 class _SignalRuntime:
     config: SignalConfig
@@ -100,10 +115,19 @@ class SignalManager:
                         new_runtimes[cfg.name] = existing
                         continue
                     # params changed -> fall through and rebuild fresh
-                else:
+                elif _processor_params(cfg, existing.config):
+                    # Processing structure unchanged: keep the processor's
+                    # state and this signal's plot history, but re-point it
+                    # at the NEW config. The processor reads gain/offset
+                    # (and source/enable) from its own reference each
+                    # sample, so a stale reference is exactly why a
+                    # gain/offset-only edit previously did nothing.
                     existing.config = cfg
+                    if existing.processor is not None:
+                        existing.processor.config = cfg
                     new_runtimes[cfg.name] = existing
                     continue
+                # operation/x_degree changed -> fall through and rebuild fresh
             new_runtimes[cfg.name] = self._make_runtime(cfg)
         self._runtimes = new_runtimes
 
